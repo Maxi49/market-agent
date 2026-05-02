@@ -1,0 +1,40 @@
+[project]
+name = "mercado-libre-etl-api"
+version = "0.1.0"
+description = "API de scraping para buscar productos en Mercado Libre Argentina."
+requires-python = ">=3.11"
+dependencies = [
+    "apscheduler>=3.10.4",
+    "beautifulsoup4>=4.12.3",
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+    "openai>=2.0.0",
+    "psycopg[binary]>=3.2.1",
+    "pydantic>=2.8.0",
+    "python-dotenv>=1.0.1",
+    "sqlalchemy>=2.0.32",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "alembic>=1.13.2",
+    "pytest>=8.3.0",
+    "respx>=0.21.1",
+]
+ml = [
+    "joblib>=1.4.2",
+    "scikit-learn>=1.5.0",
+]
+ml-text = [
+    "joblib>=1.4.2",
+    "scikit-learn>=1.5.0",
+    "sentence-transformers>=3.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

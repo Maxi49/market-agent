@@ -1,0 +1,33 @@
+[
+  {
+    "productId": "1751753",
+    "productName": "Celular iPhone 15 128gb",
+    "brand": "Apple",
+    "linkText": "iphone-15-128gb-1751753",
+    "items": [
+      {
+        "images": [
+          {
+            "imageUrl": "https://carrefourar.vtexassets.com/arquivos/ids/667669/iphone.jpg"
+          }
+        ],
+        "sellers": [
+          {
+            "sellerName": "CARREFOUR",
+            "commertialOffer": {
+              "Price": 1763076,
+              "ListPrice": 1999999,
+              "AvailableQuantity": 3,
+              "Installments": [
+                {
+                  "NumberOfInstallments": 12,
+                  "Value": 146923
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

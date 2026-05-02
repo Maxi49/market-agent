@@ -1,0 +1,7 @@
+{
+  "include": ["app", "tests"],
+  "exclude": [".venv", ".pytest_cache", "mercado_libre_etl_api.egg-info"],
+  "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": ".venv"
+}
