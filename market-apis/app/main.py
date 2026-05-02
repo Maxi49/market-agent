@@ -108,10 +108,11 @@ async def agent_search(
     mode: SearchMode = Query(SearchMode.INTERACTIVE),
     stores: str | None = Query(None),
     max_price_ars: float | None = Query(None),
+    min_price_ars: float | None = Query(None),
     service: SearchService = Depends(get_search_service),
 ) -> AgentSearchResponse:
     stores_list = [s.strip() for s in stores.split(",")] if stores else None
-    return await service.agent_search(query=query, limit=limit, mode=mode, stores=stores_list, max_price_ars=max_price_ars)
+    return await service.agent_search(query=query, limit=limit, mode=mode, stores=stores_list, max_price_ars=max_price_ars, min_price_ars=min_price_ars)
 
 
 @app.get("/agent/search/{run_id}/history", response_model=AgentHistoryResponse)

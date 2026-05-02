@@ -152,6 +152,7 @@ class SearchService:
         mode: SearchMode = SearchMode.INTERACTIVE,
         stores: list[str] | None = None,
         max_price_ars: float | None = None,
+        min_price_ars: float | None = None,
     ) -> AgentSearchResponse:
         router = StoreRouter(list(self.adapter_by_id))
         routing = router.route(query)
@@ -242,6 +243,16 @@ class SearchService:
                 warnings.append(f"no_results_within_budget:{int(max_price_ars)}")
             else:
                 agent_candidates = filtered
+        if min_price_ars is not None:
+            price_floor = min_price_ars * 0.80
+            filtered_min = [
+                sp for sp in agent_candidates
+                if sp.product.currency != "$" or (sp.product.price or 0) >= price_floor
+            ]
+            if not filtered_min:
+                warnings.append(f"no_results_above_minimum:{int(min_price_ars)}")
+            else:
+                agent_candidates = filtered_min
         selected_candidates = await self.link_guard.guard(agent_candidates[:limit])
         return AgentSearchResponse(
             query=query,

@@ -22,6 +22,7 @@ type SearchProductsInput = {
   mode?: SearchMode;
   stores?: string;
   maxPriceARS?: number;
+  minPriceARS?: number;
 };
 
 type MatchingCandidatesInput = {
@@ -140,6 +141,7 @@ export async function searchProducts(
     mode: input.mode ?? defaultSearchMode(),
     ...(input.stores ? { stores: input.stores } : {}),
     ...(input.maxPriceARS != null ? { max_price_ars: String(input.maxPriceARS) } : {}),
+    ...(input.minPriceARS != null ? { min_price_ars: String(input.minPriceARS) } : {}),
   });
   const data = await fetchJson<Record<string, unknown>>(url, options);
 

@@ -43,6 +43,10 @@ Despues de lanzar una tanda de llamadas, espera todas las respuestas de esa tand
 
 Las alternativas cercanas son una segunda tanda, no una repeticion: solo se habilitan despues de leer los outputs previos y confirmar que el exacto vino vacio o inutilizable. En esa segunda tanda, otra vez: una llamada por tienda, sin repetir query + tienda + modo + presupuesto.
 
+## Rate limit de tiendas
+
+Si una tienda devuelve un error de rate limit (HTTP 429, "rate limit", "too many requests" o similar en el campo errors del resultado), marcala como no disponible en este flujo y no la vuelvas a llamar. Continua con los datos de las tiendas que si respondieron. Si los resultados disponibles son suficientes, respondé directamente con eso. Si son insuficientes, explorá otras tiendas del catalogo que todavia no hayas probado en vez de reintentar las que ya fallaron por rate limit.
+
 ## Presupuesto de pasos
 
 Tenes pasos limitados. Distribucion correcta:
@@ -59,13 +63,19 @@ Excepcion importante: si search-products devuelve bestMatches vacio o solo resul
 **search-products** — busca productos en una tienda especifica.
 - Usala cuando: el usuario pide precios, opciones, comparaciones o recomendaciones de compra.
 - NO usarla cuando: el usuario paso una URL directa (usar analyze-product-url en cambio).
-- Parametros clave: 'stores' (ID de una sola tienda, opcional), 'maxPriceARS' (siempre pasalo si el usuario menciona un presupuesto), 'limit' (10 por defecto es razonable para la mayoria de busquedas).
+- Parametros clave: 'stores' (ID de una sola tienda, opcional), 'maxPriceARS' (siempre pasalo si el usuario menciona un presupuesto), 'minPriceARS' (ver guia de presupuesto abajo), 'limit' (10 por defecto es razonable para la mayoria de busquedas).
 - Modo: "interactive" por defecto. Solo "deep" si el usuario pide busqueda exhaustiva o si interactive devuelve resultados insuficientes.
 - **Como construir la query**: usa terminos tecnicos especificos que aparecerian en el titulo del producto, no una descripcion en lenguaje natural. Ejemplos:
   - MAL: "cargador para macbook pro m3 que toma la corriente" → BIEN: "Apple USB-C Power Adapter 96W MacBook Pro"
   - MAL: "auriculares buenos para cancelar ruido sony" → BIEN: "Sony WH-1000XM5 auriculares"
   - MAL: "heladera grande dos puertas no frost" → BIEN: "heladera no frost 400 litros"
   - Incluye: marca + modelo/serie + especificacion tecnica clave (watts, litros, pulgadas, GB). Omite frases de descripcion como "para", "que", "bueno", "grande".
+- **Presupuesto como señal de calidad — query y minPriceARS**: cuando el usuario NO especifica marca y tiene presupuesto alto, el presupuesto implica una expectativa de calidad. Construi la query con marcas y modelos del segmento correspondiente, no busques generico. En paralelo, pasa minPriceARS para filtrar los de baja gama que inevitablemente aparecen.
+  - Presupuesto >80k ARS, auriculares in-ear sin marca → lanza busquedas separadas: "Sony WF-C700 auriculares", "Samsung Galaxy Buds FE", "JBL Vibe Beam earbuds". minPriceARS: 40000.
+  - Presupuesto >200k ARS, celular sin marca → "Samsung Galaxy A55", "Motorola Edge 50", "iPhone SE". minPriceARS: 80000.
+  - Presupuesto >150k ARS, auriculares over-ear sin marca → "Sony WH-1000XM5", "Bose QuietComfort 45", "Samsung Galaxy Buds2 Pro". minPriceARS: 60000.
+  - Presupuesto bajo (<40k) o marca mencionada explicita → usa la marca/modelo como query, sin minPriceARS o con minPriceARS bajo.
+  - La holgura del filtro es del 20%: si pones minPriceARS=40000, el piso real es ~32000. Eso esta bien — no excluyas productos legitimos cercanos al minimo.
 
 **get-matching-candidates** — consulta si dos listings de distintas tiendas son el mismo producto (matching V5), usando el 'debugRef' del search.
 - Usala cuando: necesites saber si un resultado de Fravega y uno de ML son el mismo producto o variantes distintas.
@@ -203,6 +213,7 @@ Responde en espanol rioplatense, breve, practico y honesto. Sin introducciones n
 - No inventes precios, tiendas, disponibilidad ni links. Solo datos de bestMatches.
 - Si search-products devuelve bestMatches vacio, no inventes precios ni rangos. No cierres la respuesta sin alternativas cercanas: si queda un paso disponible, busca una variante cercana; si ya estas en el paso final, explica la limitacion y propone la busqueda alternativa concreta.
 - Matching V5 es una senal auxiliar, no verdad final. Decide con criterio propio usando titulo, marca, modelo, condicion, precio y tienda.
+- Si una tienda devolvio rate limit, no la reintentes. Usa las otras tiendas disponibles o probá una tienda distinta del catalogo.
 - NUNCA incluyas la columna "Precio USD" en la tabla si todos los precios estan en ARS. Esa columna solo aparece cuando al menos un resultado tiene priceUSD.
 - Los productos sospechosos van en la tabla separada "⚠️ Productos a verificar" DESPUES del analisis. NUNCA en la tabla principal ni mencionados dos veces.
 `;
@@ -227,7 +238,30 @@ export const marketShoppingAgent = new Agent({
     maxSteps: MARKET_AGENT_MAX_STEPS,
     prepareStep: async ({ stepNumber, systemMessages }) => {
       if (stepNumber === 0) {
-        return { toolChoice: "required" };
+        return {
+          toolChoice: "required",
+          systemMessages: [
+            ...systemMessages,
+            {
+              role: "system" as const,
+              content:
+                "CRITICO: Tu primer output debe ser una tool call, sin ningún texto previo. No escribas introducción, confirmación ni narración. Cero texto antes de la herramienta.",
+            },
+          ],
+        };
+      }
+
+      if (stepNumber > 0 && stepNumber < MARKET_AGENT_MAX_STEPS - 1) {
+        return {
+          systemMessages: [
+            ...systemMessages,
+            {
+              role: "system" as const,
+              content:
+                "Si necesitás más búsquedas, llamá las herramientas directamente como primer output, sin escribir texto previo. No más de 3 tool calls en este paso. Nada de introducciones ni transiciones entre rondas.",
+            },
+          ],
+        };
       }
 
       if (stepNumber >= MARKET_AGENT_MAX_STEPS - 1) {

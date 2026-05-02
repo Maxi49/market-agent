@@ -11,6 +11,55 @@ import {
   type SearchProductsOutput,
 } from "./marketApiClient";
 
+// ---------------------------------------------------------------------------
+// Rate-limit registry
+// Tracks stores that returned HTTP 429 / rate-limit errors within a thread.
+// Once registered, subsequent tool calls for that store are short-circuited
+// so the agent never wastes a step retrying an unavailable store.
+// ---------------------------------------------------------------------------
+
+const rateLimitedByThread = new Map<string, Set<string>>();
+
+function blockedStores(threadId: string | undefined): Set<string> {
+  const key = threadId ?? "__global__";
+  let set = rateLimitedByThread.get(key);
+  if (!set) {
+    set = new Set();
+    rateLimitedByThread.set(key, set);
+  }
+  return set;
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const msg = String((error as { message?: unknown }).message ?? "").toLowerCase();
+  return (
+    msg.includes("rate limit") ||
+    msg.includes("ratelimit") ||
+    msg.includes("too many requests") ||
+    msg.includes("429")
+  );
+}
+
+function rateLimitedOutput(query: string, storeId: string): SearchProductsOutput {
+  return {
+    query,
+    debugRef: null,
+    routing: { selected_store_ids: [storeId] },
+    queryUnderstanding: null,
+    bestMatches: [],
+    historyStatus: null,
+    warnings: [`${storeId} ya devolvio rate limit anteriormente y esta bloqueada para esta sesion.`],
+    errors: [
+      {
+        store_id: storeId,
+        store_name: storeId,
+        message: `RATE_LIMIT_BLOCKED — ${storeId} esta bloqueada. No repitas esta tienda. Usa otras tiendas del catalogo.`,
+      },
+    ],
+  };
+}
+
 const compactMatchSchema = z.object({
   storeId: z.string(),
   storeName: z.string(),
@@ -61,6 +110,7 @@ export const searchProductsTool = createTool({
     mode: z.enum(["interactive", "deep"]).default("interactive"),
     stores: z.string().optional().describe("ID de una sola tienda donde buscar (ej: 'fravega'). Para varias tiendas, una llamada por tienda en paralelo. No repetir la misma query para la misma tienda."),
     maxPriceARS: z.number().positive().optional().describe("Presupuesto maximo en pesos argentinos. Filtra resultados de tiendas locales que superen ese precio."),
+    minPriceARS: z.number().positive().optional().describe("Precio minimo de referencia en pesos argentinos (el filtro aplica con 20% de holgura). Usalo para excluir resultados de muy baja gama que no corresponden al segmento del usuario. No aplica a resultados en USD (Amazon)."),
   }),
   outputSchema: z.object({
     query: z.string(),
@@ -72,11 +122,31 @@ export const searchProductsTool = createTool({
     warnings: z.array(z.string()),
     errors: z.array(z.unknown()),
   }),
-  execute: async (input, context) => {
+  execute: async ({ query, limit, mode, stores, maxPriceARS, minPriceARS }, context) => {
+    const threadId = (context as Record<string, unknown>).threadId as string | undefined;
+    const blocked = blockedStores(threadId);
+
+    if (stores && blocked.has(stores)) {
+      return rateLimitedOutput(query, stores);
+    }
+
     try {
-      return await searchProducts(input, { abortSignal: context.abortSignal });
+      const result = await searchProducts({ query, limit, mode, stores, maxPriceARS, minPriceARS }, { abortSignal: context.abortSignal });
+
+      // Register newly rate-limited stores so subsequent calls are blocked
+      for (const err of result.errors) {
+        if (isRateLimitError(err)) {
+          const sid = errorStoreId(err);
+          if (sid) blocked.add(sid);
+        }
+      }
+
+      return result;
     } catch (error) {
-      return emptySearchOutput(input.query, error);
+      if (stores && isRateLimitError(error)) {
+        blocked.add(stores);
+      }
+      return emptySearchOutput(query, error);
     }
   },
   toModelOutput: (output) => ({
