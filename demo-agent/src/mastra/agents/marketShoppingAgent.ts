@@ -6,6 +6,7 @@ import {
   getMatchingCandidatesTool,
   getPriceHistoryTool,
   searchProductsTool,
+  searchEverywhereTool,
 } from "../tools/marketApi";
 import {
   calculateInstallmentsTool,
@@ -46,6 +47,10 @@ Las alternativas cercanas son una segunda tanda, no una repeticion: solo se habi
 ## Rate limit de tiendas
 
 Si una tienda devuelve un error de rate limit (HTTP 429, "rate limit", "too many requests" o similar en el campo errors del resultado), marcala como no disponible en este flujo y no la vuelvas a llamar. Continua con los datos de las tiendas que si respondieron. Si los resultados disponibles son suficientes, respondé directamente con eso. Si son insuficientes, explorá otras tiendas del catalogo que todavia no hayas probado en vez de reintentar las que ya fallaron por rate limit.
+
+## Busqueda en tiendas externas (Search Everywhere)
+
+Tienes acceso a la herramienta \`search-everywhere\`. Usala EXCLUSIVAMENTE cuando el usuario te pida explícitamente buscar en una tienda que no conoces o que no está en tu catálogo oficial, o cuando necesites agotar instancias tras fallar en tus tiendas de base. Toma el dominio de la tienda y la query. NO la uses para tiendas ya soportadas por \`search-products\`.
 
 ## Presupuesto de pasos
 
@@ -138,6 +143,10 @@ Excepcion importante: si search-products devuelve bestMatches vacio o solo resul
 - Usar cuando: el producto no tiene stock local confiable, el usuario quiere precio internacional, o busca algo muy especifico que solo se consigue importado (accesorios Apple originales, hardware especifico).
 - SIEMPRE aclarar: precio en USD, no incluye envio ni impuestos de importacion argentina (pueden duplicar el precio), garantia distinta, stock variable. No es compra directa desde Argentina.
 
+**farmacity_ar** — salud, cuidado personal, belleza, perfumeria, bebes y algunos productos de supermercado.
+- Usar para: productos de farmacia, cuidado de la piel, maquillaje, perfumes, vitaminas, suplementos.
+- NO usar cuando: tecnologia, electrodomesticos, herramientas. Farmacity no vende TVs ni celulares.
+
 **Regla de seleccion de tiendas**: antes de llamar search-products, determina que tiendas tienen sentido para el producto segun el catalogo de cada una. Es preferible buscar en 2-3 tiendas relevantes que en 6 donde 4 no van a tener el producto.
 
 Ejemplos de seleccion correcta:
@@ -174,14 +183,19 @@ Usa la memoria de la conversacion. Si el usuario dice "ese", "ese modelo", "vari
 Antes de escribir tu respuesta final con resultados, es OBLIGATORIO que uses el tool \`think\` para razonar brevemente (solo los números clave, no la lista completa):
 1. Calculá el precio promedio estimado de los productos nuevos.
 2. Identificá qué productos valen la mitad (o menos) de ese promedio — son SOSPECHOSOS y van a la tabla separada, NO a la tabla principal.
-3. Decidí el orden de la tabla y qué columnas incluir.
+3. Decidí tu Top 3 de productos recomendados (1. Mejor general, 2. Mejor precio-calidad, 3. Alternativa).
+4. Decidí el orden de la tabla y qué columnas incluir.
 
 Cuando hay multiples resultados comparables, presenta la siguiente estructura:
 
-**Tabla principal** — solo productos validos (sin sospechosos). Hasta ~10 filas. NUNCA ordenes por precio de menor a mayor. Orden obligatorio:
-1. Mejores opciones reales, nuevas y confiables.
-2. Opciones de calidad media o alternativas.
-3. Usados o reacondicionados (si aplica).
+**Tabla principal** — solo productos validos (sin sospechosos). Hasta ~10 filas. NUNCA ordenes por precio de menor a mayor.
+¡MUY IMPORTANTE! La tabla debe ir ORDENADA y tus 3 recomendaciones deben estar obligatoriamente al principio de la tabla.
+En la columna "#", colocá EXACTAMENTE el número de ranking para tus recomendados (1, 2, 3) y usá un guion (-) para el resto.
+Orden obligatorio de las filas:
+1. Puesto 1 (Mejor opcion general) - Poner "1" en la columna #.
+2. Puesto 2 (Mejor precio-calidad) - Poner "2" en la columna #.
+3. Puesto 3 (Alternativa) - Poner "3" en la columna #.
+4. Resto de opciones validas - Poner "-" en la columna #.
 
 COLUMNAS OBLIGATORIAS: # | Tienda | Producto | Precio ARS | Condicion | Link
 COLUMNA PRECIO USD: SOLO incluila si al menos un resultado tiene priceUSD. Si todos los precios estan en ARS, NO incluyas esa columna. El titulo puede ser corto.
@@ -289,6 +303,7 @@ export const marketShoppingAgent = new Agent({
   },
   tools: {
     searchProducts: searchProductsTool,
+    searchEverywhere: searchEverywhereTool,
     getMatchingCandidates: getMatchingCandidatesTool,
     getPriceHistory: getPriceHistoryTool,
     getExchangeRates: getExchangeRatesTool,

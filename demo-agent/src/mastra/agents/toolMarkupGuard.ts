@@ -88,9 +88,21 @@ export const toolMarkupGuardProcessor: OutputProcessor = {
       return null;
     }
 
-    state.streamText = ((state.streamText as string | undefined) ?? "") + chunk;
+    const prevText = (state.streamText as string | undefined) ?? "";
+    state.streamText = prevText + chunk;
 
-    if (hasUnsafeStreamContent(state.streamText as string)) {
+    const accumulated = state.streamText as string;
+    // Narration patterns are preambles: they appear at the very start of a step,
+    // before any tool call. In a final answer the same phrases can appear
+    // legitimately mid-response (e.g. "no encontré nada, si querés voy a buscar
+    // algo similar"). Guard against false positives by only applying narration
+    // patterns before the first sentence-ending punctuation has been seen.
+    const isEarlyPreamble = prevText.length < 200 && !/[.!?]/.test(prevText);
+    const unsafe =
+      TOOL_DSL_PATTERNS.some((p) => p.test(accumulated)) ||
+      (isEarlyPreamble && NARRATION_PATTERNS.some((p) => p.test(accumulated)));
+
+    if (unsafe) {
       state.dropText = true;
       state.hadSilentDrop = true;
       // Signal the client to discard accumulated content so far

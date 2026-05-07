@@ -311,3 +311,8 @@ class EmbeddingBackfillResponse(BaseModel):
     budget_remaining_tokens: int | None = None
     errors: list[str] = Field(default_factory=list)
     dry_run: bool = True
+
+
+class SearchEverywhereResponse(BaseModel):
+    shopping_results: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None

@@ -354,3 +354,10 @@ class SonyAdapter(VtexAdapter):
     store_name: str = "Sony Store Argentina"
     base_url: str = "https://store.sony.com.ar"
 
+
+@dataclass(frozen=True)
+class FarmacityAdapter(VtexAdapter):
+    store_id: str = "farmacity_ar"
+    store_name: str = "Farmacity"
+    base_url: str = "https://www.farmacity.com"
+

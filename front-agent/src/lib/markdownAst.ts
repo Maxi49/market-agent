@@ -26,25 +26,19 @@ export type MarkdownRoot = MarkdownNode & {
   children: MarkdownNode[];
 };
 
-export type Recommendation = {
-  rank: RecommendationRank;
-  text: string;
-  normalizedText: string;
-  priceKey: string | null;
-  store: string | null;
-};
-
-type TableRowMatch = {
-  node: MarkdownNode;
-  cells: string[];
-  originalIndex: number;
-  rank?: RecommendationRank;
-};
-
 const parser = unified().use(remarkParse).use(remarkGfm);
 
 export function parseMarkdown(markdown: string): MarkdownRoot {
-  return parser.parse(markdown) as MarkdownRoot;
+  return parser.parse(sanitizeLinkUrls(markdown)) as MarkdownRoot;
+}
+
+function sanitizeLinkUrls(markdown: string): string {
+  // Encode | and spaces inside link URLs so remark-gfm table splitting and
+  // CommonMark link parsing don't break on Google Shopping URLs.
+  return markdown.replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_match, text, url) => {
+    const safeUrl = url.replace(/\|/g, "%7C").replace(/[ \t]+/g, "%20");
+    return `[${text}](${safeUrl})`;
+  });
 }
 
 export function buildMarkdownAst(
@@ -54,20 +48,13 @@ export function buildMarkdownAst(
   const root = cloneAst(parseMarkdown(markdown));
 
   if (options.enhanceRecommendations !== false) {
-    enhanceRecommendationTables(root, extractRecommendations(markdown));
+    enhanceRecommendationTables(root);
   }
 
   return root;
 }
 
-export function enhanceRecommendationTables(
-  root: MarkdownRoot,
-  recommendations: Recommendation[],
-): MarkdownRoot {
-  if (!recommendations.length) {
-    return root;
-  }
-
+export function enhanceRecommendationTables(root: MarkdownRoot): MarkdownRoot {
   visit(root, "table", (table: MarkdownNode) => {
     const rows = table.children ?? [];
     const header = rows[0];
@@ -77,62 +64,22 @@ export function enhanceRecommendationTables(
       return;
     }
 
-    const promoted = promoteRecommendedRows(
-      bodyRows.map((node, originalIndex) => ({
-        node,
-        cells: rowTexts(node),
-        originalIndex,
-      })),
-      recommendations,
-    );
+    for (const row of bodyRows) {
+      const cells = rowTexts(row);
+      const firstCell = (cells[0] || "").trim().replace(/^#/, "");
+      const rank = parseInt(firstCell, 10);
 
-    if (!promoted.some((row) => row.rank)) {
-      return;
-    }
-
-    for (const row of promoted) {
-      if (row.rank) {
-        row.node.data = {
-          ...(row.node.data ?? {}),
-          recommendationRank: row.rank,
-          recommendationClass: `recommendation-row ${rankClass(row.rank)}`,
+      if (!isNaN(rank) && rank >= 1 && rank <= 3) {
+        row.data = {
+          ...(row.data ?? {}),
+          recommendationRank: rank as RecommendationRank,
+          recommendationClass: `recommendation-row ${rankClass(rank as RecommendationRank)}`,
         };
       }
     }
-
-    table.children = [header, ...promoted.map((row) => row.node)];
   });
 
   return root;
-}
-
-export function extractRecommendations(markdown: string): Recommendation[] {
-  const recommendations: Recommendation[] = [];
-  const lines = markdown
-    .split(/\r?\n/)
-    .map((line) => stripMarkdown(line).trim())
-    .filter(Boolean);
-
-  for (const line of lines) {
-    const rank = recommendationRank(line, recommendations.length);
-    if (!rank || recommendations.some((recommendation) => recommendation.rank === rank)) {
-      continue;
-    }
-
-    recommendations.push({
-      rank,
-      text: line,
-      normalizedText: normalizeText(line),
-      priceKey: normalizePrice(line),
-      store: extractStore(line),
-    });
-
-    if (recommendations.length >= 4) {
-      break;
-    }
-  }
-
-  return recommendations;
 }
 
 export function nodeText(node: MarkdownNode | undefined): string {
@@ -187,114 +134,11 @@ function rowTexts(row: MarkdownNode): string[] {
   return (row.children ?? []).map(nodeText);
 }
 
-function promoteRecommendedRows(
-  rows: TableRowMatch[],
-  recommendations: Recommendation[],
-): TableRowMatch[] {
-  if (!recommendations.length || rows.length < 2) {
-    return rows;
-  }
-
-  const claimedRows = new Set<number>();
-  const promoted: TableRowMatch[] = [];
-
-  for (const recommendation of recommendations) {
-    const candidate = bestRowMatch(rows, recommendation, claimedRows);
-    if (!candidate) {
-      continue;
-    }
-
-    claimedRows.add(candidate.row.originalIndex);
-    promoted.push({ ...candidate.row, rank: recommendation.rank });
-  }
-
-  if (!promoted.length) {
-    return rows;
-  }
-
-  const promotedIds = new Set(promoted.map((row) => row.originalIndex));
-  return [
-    ...promoted.sort((left, right) => (left.rank ?? 4) - (right.rank ?? 4)),
-    ...rows.filter((row) => !promotedIds.has(row.originalIndex)),
-  ];
-}
-
-function bestRowMatch(
-  rows: TableRowMatch[],
-  recommendation: Recommendation,
-  claimedRows: Set<number>,
-): { row: TableRowMatch; score: number } | null {
-  const candidates = rows
-    .filter((row) => !claimedRows.has(row.originalIndex))
-    .map((row) => ({ row, score: recommendationScore(row.cells, recommendation) }))
-    .filter((candidate) => candidate.score >= 7)
-    .sort((left, right) => right.score - left.score);
-
-  return candidates[0] ?? null;
-}
-
-function recommendationScore(cells: string[], recommendation: Recommendation): number {
-  const rowText = normalizeText(cells.join(" "));
-  const rowPrice = normalizePrice(cells.join(" "));
-  const rowTokens = significantTokens(rowText);
-  const recommendationTokens = significantTokens(recommendation.normalizedText);
-  const overlap = recommendationTokens.filter((token) => rowTokens.includes(token)).length;
-  let score = overlap;
-
-  if (recommendation.priceKey && rowPrice === recommendation.priceKey) {
-    score += 6;
-  }
-
-  if (recommendation.store && rowText.includes(recommendation.store)) {
-    score += 4;
-  }
-
-  if (recommendationTokens.length > 0 && overlap / recommendationTokens.length >= 0.45) {
-    score += 3;
-  }
-
-  return score;
-}
-
 function rankClass(rank: RecommendationRank): string {
   if (rank === 1) return "recommendation-gold";
   if (rank === 2) return "recommendation-silver";
   if (rank === 3) return "recommendation-bronze";
   return "recommendation-highlight";
-}
-
-function recommendationRank(line: string, currentCount: number): RecommendationRank | null {
-  const normalized = normalizeText(line);
-
-  if (/mejor opcion general/.test(normalized)) return 1;
-  if (/mejor precio calidad|precio calidad/.test(normalized)) return 2;
-  if (/alternativa solida|si queres|capacidad grande|tercer/.test(normalized)) return 3;
-
-  if (
-    currentCount >= 3 &&
-    currentCount < 4 &&
-    /^.+\s+-\s+.+/.test(normalized) &&
-    !normalized.includes("productos a verificar")
-  ) {
-    return 4;
-  }
-
-  return null;
-}
-
-function stripMarkdown(value: string): string {
-  return value
-    .replace(/\*\*/g, "")
-    .replace(/[`_*]/g, "")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, "$1")
-    .replace(/^[^\p{L}\p{N}$]+/u, "")
-    .trim();
-}
-
-function extractStore(value: string): string | null {
-  const normalized = normalizeText(value);
-  const match = normalized.match(/\ben\s+([a-z0-9 ]+)\)?$/);
-  return match?.[1]?.trim() ?? null;
 }
 
 function normalizeText(value: string): string {
@@ -307,50 +151,6 @@ function normalizeText(value: string): string {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function normalizePrice(value: string): string | null {
-  const match = value.match(/\$\s*[\d.,]+/);
-  if (!match) {
-    return null;
-  }
-
-  const digits = match[0].replace(/\D/g, "");
-  return digits.length > 0 ? digits : null;
-}
-
-function significantTokens(value: string): string[] {
-  const stopWords = new Set([
-    "mejor",
-    "opcion",
-    "general",
-    "precio",
-    "calidad",
-    "alternativa",
-    "solida",
-    "queres",
-    "capacidad",
-    "grande",
-    "con",
-    "sin",
-    "para",
-    "por",
-    "en",
-    "el",
-    "la",
-    "los",
-    "las",
-    "una",
-    "uno",
-    "nuevo",
-    "nueva",
-    "ars",
-  ]);
-
-  return value
-    .split(/\s+/)
-    .map((token) => token.replace(/^-+|-+$/g, ""))
-    .filter((token) => token.length >= 3 && !stopWords.has(token));
 }
 
 function encodeQuery(value: string): string {

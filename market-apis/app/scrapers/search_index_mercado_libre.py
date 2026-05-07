@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from os import getenv
 from typing import Any
@@ -20,6 +19,7 @@ MERCADO_LIBRE_PRODUCT_HOSTS = frozenset({
     "mercadolibre.com.ar",
     "www.mercadolibre.com.ar",
     "articulo.mercadolibre.com.ar",
+    "listado.mercadolibre.com.ar",
 })
 
 
@@ -135,7 +135,6 @@ class MercadoLibreSearchIndexAdapter:
                 "price_reliability": price_reliability,
                 "price_source": source,
                 "link_reliability": link_reliability,
-                "google_product_link": url if link_reliability == "search_fallback" else None,
                 "source": result.get("source"),
                 "product_id": result.get("product_id"),
                 "serpapi_product_api": result.get("serpapi_product_api"),
@@ -164,24 +163,22 @@ def _is_mercado_libre_result(result: dict[str, Any], url: str) -> bool:
 
 def _product_url_from_result(title: str, url: str) -> tuple[str, str]:
     parsed = urlparse(url)
-    if parsed.hostname in ("www.google.com", "google.com") and parsed.path == "/url":
+    hostname = parsed.hostname or ""
+
+    # Unwrap google.com redirect URLs (google.com/url?q= or ?url=)
+    if hostname in ("www.google.com", "google.com", "www.google.com.ar", "google.com.ar") and parsed.path == "/url":
         qs = parse_qs(parsed.query)
-        if "url" in qs:
-            url = qs["url"][0]
-        elif "q" in qs:
-            url = qs["q"][0]
+        candidate = (qs.get("url") or qs.get("q") or [None])[0]
+        if candidate and urlparse(candidate).hostname:
+            url = candidate
 
     if _is_product_url(url):
         return url, "direct"
-    return _mercado_libre_search_url(title), "search_fallback"
 
-
-def _mercado_libre_search_url(title: str) -> str:
-    normalized = unicodedata.normalize("NFKD", title.lower())
-    ascii_title = "".join(char for char in normalized if not unicodedata.combining(char))
-    tokens = re.findall(r"[a-z0-9]+", ascii_title)
-    slug = "-".join(tokens) or "productos"
-    return f"https://listado.mercadolibre.com.ar/{slug}"
+    # Use whatever link SerpAPI returned rather than constructing a fake URL.
+    # product_link from google_shopping points to the Google Shopping product page,
+    # which is still a valid, real link to the product.
+    return url, "google_product"
 
 
 def _price_from_result(result: dict[str, Any]) -> tuple[float | None, str | None, str | None]:

@@ -260,12 +260,15 @@ function renderParagraph(text: string): string {
 }
 
 function splitTableLine(line: string): string[] {
-  return line
+  // Protect | inside markdown link URLs before splitting on | (table separator).
+  // Google Shopping URLs can contain | in their query params (e.g. prds=eto:...|...).
+  const safeLine = line.replace(/\[[^\]]*\]\([^)]*\)/g, (m) => m.replace(/\|/g, "\x00"));
+  return safeLine
     .trim()
     .replace(/^\|/, "")
     .replace(/\|$/, "")
     .split("|")
-    .map((cell) => cell.trim());
+    .map((cell) => cell.trim().replace(/\x00/g, "|"));
 }
 
 function stripMarkdown(value: string): string {
@@ -341,7 +344,9 @@ function significantTokens(value: string): string[] {
 
 function inlineMarkdown(value: string): string {
   const segments: string[] = [];
-  const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  // Allow balanced () inside URLs (e.g. Google Shopping prds params).
+  // Matches: [text](url) where url may contain (...) pairs but no bare unmatched ).
+  const linkPattern = /\[([^\]]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 

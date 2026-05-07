@@ -5,11 +5,14 @@ import {
   getMatchingCandidates,
   getPriceHistory,
   searchProducts,
+  searchEverywhere,
   type MatchingCandidatesOutput,
   type PriceHistoryOutput,
   type ProductAnalysis,
   type SearchProductsOutput,
 } from "./marketApiClient";
+
+import { searchEverywhereExtractorAgent } from "../agents/extractorAgent";
 
 // ---------------------------------------------------------------------------
 // Rate-limit registry
@@ -146,6 +149,95 @@ export const searchProductsTool = createTool({
       if (stores && isRateLimitError(error)) {
         blocked.add(stores);
       }
+      return emptySearchOutput(query, error);
+    }
+  },
+  toModelOutput: (output) => ({
+    type: "text",
+    value: toModelText(compactSearchModelOutput(output)),
+  }),
+});
+
+export const searchEverywhereTool = createTool({
+  id: "search-everywhere",
+  description:
+    "Busca productos en CUALQUIER tienda o dominio arbitrario usando SerpAPI. Usala SOLO cuando la tienda solicitada NO este en el catalogo oficial de tiendas, o como ultimo recurso si no encontras opciones. Toma el dominio de la tienda (ej: 'sony.com.ar') y el producto a buscar. NO la uses para tiendas ya soportadas por search-products (mercadolibre, fravega, etc.).",
+  inputSchema: z.object({
+    query: z.string().min(2).max(120),
+    url: z.string().describe("Dominio o nombre de la tienda donde buscar, ej: 'nike.com.ar' o 'farmacity'"),
+    limit: z.number().int().min(1).max(20).default(10),
+    maxPriceARS: z.number().positive().optional().describe("Presupuesto maximo en pesos argentinos. Filtra resultados que superen ese precio."),
+    minPriceARS: z.number().positive().optional().describe("Precio minimo de referencia en pesos argentinos (el filtro aplica con 20% de holgura)."),
+    strict: z.boolean().default(false).describe("Si es true, obliga a descartar resultados que no pertenezcan EXCLUYENTEMENTE al dominio solicitado. Usalo cuando el usuario pide explícitamente buscar en una tienda específica y no le interesan alternativas de revendedores."),
+  }),
+  outputSchema: z.object({
+    query: z.string(),
+    debugRef: z.number().nullable(),
+    routing: z.unknown(),
+    queryUnderstanding: z.unknown(),
+    bestMatches: z.array(compactMatchSchema),
+    historyStatus: z.unknown(),
+    warnings: z.array(z.string()),
+    errors: z.array(z.unknown()),
+  }),
+  execute: async ({ query, url, limit, maxPriceARS, minPriceARS, strict }) => {
+    try {
+      const rawOutput = await searchEverywhere({ query, url, limit, maxPriceARS, minPriceARS, strict });
+
+      if (rawOutput.error) {
+        return emptySearchOutput(query, rawOutput.error);
+      }
+
+      if (!rawOutput.shopping_results || rawOutput.shopping_results.length === 0) {
+        return emptySearchOutput(query, "No se encontraron resultados estructurados para esta tienda.");
+      }
+
+      // Call the extractor sub-agent to parse the raw JSON
+      const extractionResult = await searchEverywhereExtractorAgent.generate(
+        `Extrae la info de estos resultados crudos. Devuelve UNICAMENTE un array de objetos JSON validos con el formato [{title, price, url, imageUrl, source}], sin texto adicional ni bloques de markdown: ${JSON.stringify(rawOutput.shopping_results.slice(0, limit))}`
+      );
+
+      let parsedResults = [];
+      try {
+        const cleanText = extractionResult.text.replace(/```json/gi, '').replace(/```/g, '').trim();
+        parsedResults = JSON.parse(cleanText);
+        if (!Array.isArray(parsedResults) && parsedResults.results) {
+           parsedResults = parsedResults.results; // fallback if wrapped
+        }
+      } catch (e) {
+        console.error("Error parsing extractor agent output:", e);
+      }
+
+      const extractedMatches = parsedResults.map((r: any) => ({
+        storeId: r.source || url || "unknown",
+        storeName: r.source || url || "Tienda Externa",
+        title: r.title,
+        normalizedName: null,
+        price: r.price,
+        currency: "$",
+        priceARS: r.price,
+        priceUSD: null,
+        productUrl: r.url,
+        imageUrl: r.imageUrl,
+        score: null,
+        explanation: null,
+        risks: [],
+        trustSignals: null,
+        historicalSignal: null,
+        semanticMatch: null,
+      }));
+
+      return {
+        query,
+        debugRef: null,
+        routing: { selected_store_ids: [url || "search-everywhere"] },
+        queryUnderstanding: null,
+        bestMatches: extractedMatches,
+        historyStatus: null,
+        warnings: ["Resultados obtenidos mediante busqueda externa (SerpAPI). La informacion puede ser menos precisa."],
+        errors: [],
+      };
+    } catch (error) {
       return emptySearchOutput(query, error);
     }
   },

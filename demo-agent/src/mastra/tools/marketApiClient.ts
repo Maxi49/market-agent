@@ -244,6 +244,40 @@ export async function analyzeProductUrl(
   };
 }
 
+export type SearchEverywhereInput = {
+  query: string;
+  url?: string;
+  limit?: number;
+  maxPriceARS?: number;
+  minPriceARS?: number;
+  strict?: boolean;
+};
+
+export type SearchEverywhereRawOutput = {
+  shopping_results: Record<string, unknown>[];
+  error: string | null;
+};
+
+export async function searchEverywhere(
+  input: SearchEverywhereInput,
+  options: ClientOptions = {},
+): Promise<SearchEverywhereRawOutput> {
+  const url = buildUrl(options.baseUrl, "/agent/search-everywhere", {
+    query: input.query,
+    ...(input.url ? { url: input.url } : {}),
+    ...(input.limit != null ? { limit: String(input.limit) } : {}),
+    ...(input.maxPriceARS != null ? { max_price_ars: String(input.maxPriceARS) } : {}),
+    ...(input.minPriceARS != null ? { min_price_ars: String(input.minPriceARS) } : {}),
+    ...(input.strict != null ? { strict: String(input.strict) } : {}),
+  });
+  const data = await fetchJson<Record<string, unknown>>(url, options);
+
+  return {
+    shopping_results: asArray(data.shopping_results),
+    error: stringOrNull(data.error),
+  };
+}
+
 function buildUrl(
   baseUrl = process.env.MARKET_API_BASE_URL ?? "http://127.0.0.1:8000",
   path: string,

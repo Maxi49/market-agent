@@ -101,6 +101,34 @@ describe("markdown AST renderer pipeline", () => {
     expect(firstBodyRow?.data?.recommendationClass).toBe("recommendation-row recommendation-gold");
   });
 
+  it("preserves table structure when link URLs contain pipe characters", () => {
+    const markdown = [
+      "| # | Tienda | Producto | Precio ARS | Link |",
+      "|---|--------|----------|------------|------|",
+      "| 1 | ML | Panini Album FIFA 2022 | $15.000 | [Ver](https://www.google.com.ar/shopping?q=panini&prds=eto:abc|def,pvt:hg) |",
+    ].join("\n");
+
+    const root = buildMarkdownAst(markdown, { enhanceRecommendations: false });
+    const table = root.children.find((node) => node.type === "table");
+    const bodyRow = table?.children?.[1];
+
+    expect(bodyRow?.children?.length).toBe(5);
+  });
+
+  it("preserves table structure when link URLs contain spaces", () => {
+    const markdown = [
+      "| # | Tienda | Producto | Precio ARS | Link |",
+      "|---|--------|----------|------------|------|",
+      "| 1 | ML | Álbum Panini | $15.000 | [Ver](https://example.com/search?q=album panini) |",
+    ].join("\n");
+
+    const root = buildMarkdownAst(markdown, { enhanceRecommendations: false });
+    const table = root.children.find((node) => node.type === "table");
+    const bodyRow = table?.children?.[1];
+
+    expect(bodyRow?.children?.length).toBe(5);
+  });
+
   it("leaves tables untouched when recommendations cannot be matched confidently", () => {
     const markdown = [
       "| # | Tienda | Producto | Precio ARS |",

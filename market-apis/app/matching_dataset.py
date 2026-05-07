@@ -5,24 +5,25 @@ import asyncio
 import json
 import random
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, TypeAlias, cast
 
 import httpx
 
 from app.config import get_settings
-from app.database import OptionalRepository, build_repository
+from app.database import OptionalRepository, SearchRepository, build_repository
 from app.matching import build_pair_features_from_values
 from app.matching_model import (
     FEATURE_NAMES,
     FEATURES_VERSION,
-    _features_from_candidates,
-    _build_estimator,
-    _classification_metrics,
-    _load_ml,
+    build_estimator,
+    classification_metrics,
     decision_from_probability,
+    features_from_candidates,
+    load_ml,
     vectorize_features,
 )
 from app.matching_semantic import (
@@ -38,7 +39,12 @@ from app.matching_semantic import (
     resolve_reranker_model_name,
     resolve_semantic_model_name,
 )
-from app.models import ProductMatchLabelValue, ProductPairFeatures, SearchMode
+from app.models import (
+    ProductMatchCandidate,
+    ProductMatchLabelValue,
+    ProductPairFeatures,
+    SearchMode,
+)
 from app.scrapers.registry import build_store_registry
 from app.services import SearchService
 
@@ -80,6 +86,59 @@ TARGET_BUCKET_RATIOS = {
     "random": 0.20,
     "deliberate": 0.10,
 }
+CampaignRow: TypeAlias = dict[str, object]
+PredictionFields: TypeAlias = dict[str, str | float | None]
+MetricsReport: TypeAlias = dict[str, object]
+
+
+class _Predictor(Protocol):
+    def predict_proba(self, features: Sequence[Sequence[float]]) -> object: ...
+
+
+class MatchingDatasetRepository(Protocol):
+    def init_schema(self) -> None: ...
+    def create_matching_dataset_campaign(
+        self,
+        *,
+        name: str,
+        description: str | None,
+        queries: Sequence[str],
+        query_categories: dict[str, str],
+        target_train_count: int,
+        target_test_count: int,
+    ) -> object: ...
+    def seed_stores(self, stores: dict[str, str]) -> object: ...
+    def list_match_candidates(
+        self,
+        *,
+        status: str,
+        limit: int,
+        query_text: str,
+        run_id: int,
+    ) -> list[ProductMatchCandidate]: ...
+    def matching_dataset_summary(self, campaign_name: str) -> MetricsReport: ...
+    def add_matching_dataset_items(self, campaign_name: str, rows: Sequence[CampaignRow]) -> int: ...
+    def list_matching_dataset_rows(
+        self,
+        campaign_name: str,
+        *,
+        split: str | None = None,
+        labeled: bool | None = None,
+        limit: int | None = None,
+    ) -> list[CampaignRow]: ...
+    def update_matching_dataset_item_splits(
+        self, campaign_name: str, assignments: Sequence[tuple[int, str, str]]
+    ) -> int: ...
+    def label_matching_dataset_item(
+        self,
+        item_id: int,
+        label: str,
+        *,
+        label_source: str,
+        label_reason: str | None,
+    ) -> object: ...
+    def freeze_matching_dataset_campaign(self, campaign_name: str) -> object: ...
+    def get_active_match_model(self) -> CampaignRow | None: ...
 
 
 @dataclass(frozen=True)
@@ -95,121 +154,131 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build = subparsers.add_parser("build-campaign")
-    build.add_argument("--name", required=True)
-    build.add_argument("--description", default=None)
-    build.add_argument("--queries-file", default=None)
-    build.add_argument("--mode", choices=[mode.value for mode in SearchMode], default=SearchMode.INTERACTIVE.value)
-    build.add_argument("--limit", type=int, default=8)
-    build.add_argument("--target-train", type=int, default=200)
-    build.add_argument("--target-test", type=int, default=100)
+    _ = build.add_argument("--name", required=True)
+    _ = build.add_argument("--description", default=None)
+    _ = build.add_argument("--queries-file", default=None)
+    _ = build.add_argument("--mode", choices=[mode.value for mode in SearchMode], default=SearchMode.INTERACTIVE.value)
+    _ = build.add_argument("--limit", type=int, default=8)
+    _ = build.add_argument("--target-train", type=int, default=200)
+    _ = build.add_argument("--target-test", type=int, default=100)
 
     sample = subparsers.add_parser("sample-campaign")
-    sample.add_argument("--name", required=True)
-    sample.add_argument("--target-train", type=int, default=200)
-    sample.add_argument("--target-test", type=int, default=100)
-    sample.add_argument("--seed", type=int, default=42)
+    _ = sample.add_argument("--name", required=True)
+    _ = sample.add_argument("--target-train", type=int, default=200)
+    _ = sample.add_argument("--target-test", type=int, default=100)
+    _ = sample.add_argument("--seed", type=int, default=42)
 
     review = subparsers.add_parser("review")
-    review.add_argument("--name", required=True)
-    review.add_argument("--split", choices=["pool", "train", "test", "all"], default="all")
-    review.add_argument("--limit", type=int, default=50)
+    _ = review.add_argument("--name", required=True)
+    _ = review.add_argument("--split", choices=["pool", "train", "test", "all"], default="all")
+    _ = review.add_argument("--limit", type=int, default=50)
 
     label = subparsers.add_parser("label")
-    label.add_argument("--item-id", type=int, required=True)
-    label.add_argument("--label", choices=[value.value for value in ProductMatchLabelValue], required=True)
-    label.add_argument("--reason", default=None)
-    label.add_argument("--source", default="human_assisted")
+    _ = label.add_argument("--item-id", type=int, required=True)
+    _ = label.add_argument("--label", choices=[value.value for value in ProductMatchLabelValue], required=True)
+    _ = label.add_argument("--reason", default=None)
+    _ = label.add_argument("--source", default="human_assisted")
 
     freeze = subparsers.add_parser("freeze")
-    freeze.add_argument("--name", required=True)
-    freeze.add_argument("--allow-incomplete", action="store_true")
+    _ = freeze.add_argument("--name", required=True)
+    _ = freeze.add_argument("--allow-incomplete", action="store_true")
 
     evaluate = subparsers.add_parser("evaluate")
-    evaluate.add_argument("--name", required=True)
-    evaluate.add_argument("--artifact-path", default=None)
-    evaluate.add_argument("--semantic-model", default=None)
-    evaluate.add_argument("--semantic-cache-path", default=str(DEFAULT_SEMANTIC_CACHE_PATH))
-    evaluate.add_argument("--reranker-model", default=None)
-    evaluate.add_argument("--reranker-cache-path", default=str(DEFAULT_RERANKER_CACHE_PATH))
+    _ = evaluate.add_argument("--name", required=True)
+    _ = evaluate.add_argument("--artifact-path", default=None)
+    _ = evaluate.add_argument("--semantic-model", default=None)
+    _ = evaluate.add_argument("--semantic-cache-path", default=str(DEFAULT_SEMANTIC_CACHE_PATH))
+    _ = evaluate.add_argument("--reranker-model", default=None)
+    _ = evaluate.add_argument("--reranker-cache-path", default=str(DEFAULT_RERANKER_CACHE_PATH))
 
     summary = subparsers.add_parser("summary")
-    summary.add_argument("--name", required=True)
+    _ = summary.add_argument("--name", required=True)
 
-    args = parser.parse_args()
-    repository = build_repository(get_settings().database_url)
-    repository.init_schema()
+    args = cast(dict[str, object], vars(parser.parse_args()))
+    command = _required_str(args, "command")
+    repository = cast(MatchingDatasetRepository, cast(object, build_repository(get_settings().database_url)))
+    _ = repository.init_schema()
 
-    if args.command == "build-campaign":
+    if command == "build-campaign":
         result = asyncio.run(
             build_campaign(
                 repository,
-                name=args.name,
-                description=args.description,
-                query_categories=_load_query_categories(args.queries_file),
-                mode=SearchMode(args.mode),
-                limit=args.limit,
-                target_train_count=args.target_train,
-                target_test_count=args.target_test,
+                name=_required_str(args, "name"),
+                description=_optional_str(args, "description"),
+                query_categories=_load_query_categories(_optional_str(args, "queries_file")),
+                mode=SearchMode(_required_str(args, "mode")),
+                limit=_required_int(args, "limit"),
+                target_train_count=_required_int(args, "target_train"),
+                target_test_count=_required_int(args, "target_test"),
             )
         )
         print(json.dumps(result.__dict__, indent=2, sort_keys=True))
-    elif args.command == "sample-campaign":
+    elif command == "sample-campaign":
         result = sample_campaign(
             repository,
-            args.name,
-            target_train_count=args.target_train,
-            target_test_count=args.target_test,
-            seed=args.seed,
+            _required_str(args, "name"),
+            target_train_count=_required_int(args, "target_train"),
+            target_test_count=_required_int(args, "target_test"),
+            seed=_required_int(args, "seed"),
         )
         print(json.dumps(result, indent=2, sort_keys=True))
-    elif args.command == "review":
-        review_campaign(repository, args.name, split=args.split, limit=args.limit)
-    elif args.command == "label":
+    elif command == "review":
+        review_campaign(
+            repository,
+            _required_str(args, "name"),
+            split=_required_str(args, "split"),
+            limit=_required_int(args, "limit"),
+        )
+    elif command == "label":
         saved = repository.label_matching_dataset_item(
-            args.item_id,
-            args.label,
-            label_source=args.source,
-            label_reason=args.reason,
+            _required_int(args, "item_id"),
+            _required_str(args, "label"),
+            label_source=_required_str(args, "source"),
+            label_reason=_optional_str(args, "reason"),
         )
         print(json.dumps({"saved": saved}, sort_keys=True))
-    elif args.command == "freeze":
-        freeze_campaign(repository, args.name, allow_incomplete=args.allow_incomplete)
-        print(json.dumps({"frozen": args.name}, sort_keys=True))
-    elif args.command == "evaluate":
+    elif command == "freeze":
+        name = _required_str(args, "name")
+        freeze_campaign(repository, name, allow_incomplete=_required_bool(args, "allow_incomplete"))
+        print(json.dumps({"frozen": name}, sort_keys=True))
+    elif command == "evaluate":
+        semantic_arg = _optional_str(args, "semantic_model")
+        reranker_arg = _optional_str(args, "reranker_model")
         semantic_builder = (
             build_local_semantic_feature_builder(
-                model_name=args.semantic_model or DEFAULT_SENTENCE_TRANSFORMER_MODEL,
-                cache_path=Path(args.semantic_cache_path),
+                model_name=semantic_arg or DEFAULT_SENTENCE_TRANSFORMER_MODEL,
+                cache_path=Path(_required_str(args, "semantic_cache_path")),
             )
-            if args.semantic_model
+            if semantic_arg
             else None
         )
-        semantic_model = resolve_semantic_model_name(args.semantic_model) if args.semantic_model else None
+        semantic_model = resolve_semantic_model_name(semantic_arg) if semantic_arg else None
         reranker_builder = (
             build_local_reranker_feature_builder(
-                model_name=args.reranker_model or DEFAULT_RERANKER_MODEL,
-                cache_path=Path(args.reranker_cache_path),
+                model_name=reranker_arg or DEFAULT_RERANKER_MODEL,
+                cache_path=Path(_required_str(args, "reranker_cache_path")),
             )
-            if args.reranker_model
+            if reranker_arg
             else None
         )
-        reranker_model = resolve_reranker_model_name(args.reranker_model) if args.reranker_model else None
+        reranker_model = resolve_reranker_model_name(reranker_arg) if reranker_arg else None
         report = evaluate_campaign(
             repository,
-            args.name,
-            artifact_path=args.artifact_path,
+            _required_str(args, "name"),
+            artifact_path=_optional_str(args, "artifact_path"),
             semantic_builder=semantic_builder,
             semantic_model=semantic_model,
             reranker_builder=reranker_builder,
             reranker_model=reranker_model,
         )
         print(json.dumps(report, indent=2, sort_keys=True))
-    elif args.command == "summary":
-        print(json.dumps(repository.matching_dataset_summary(args.name), indent=2, default=str, sort_keys=True))
+    elif command == "summary":
+        summary_report = repository.matching_dataset_summary(_required_str(args, "name"))
+        print(json.dumps(summary_report, indent=2, default=str, sort_keys=True))
 
 
 async def build_campaign(
-    repository,
+    repository: MatchingDatasetRepository,
     *,
     name: str,
     description: str | None,
@@ -219,7 +288,7 @@ async def build_campaign(
     target_train_count: int,
     target_test_count: int,
 ) -> CampaignBuildResult:
-    repository.create_matching_dataset_campaign(
+    _ = repository.create_matching_dataset_campaign(
         name=name,
         description=description,
         queries=list(query_categories),
@@ -240,10 +309,10 @@ async def build_campaign(
             for store_id, adapter in registry.items()
             if store_id in settings.active_store_ids
         ]
-        repository.seed_stores({adapter.store_id: adapter.store_name for adapter in adapters})
+        _ = repository.seed_stores({adapter.store_id: adapter.store_name for adapter in adapters})
         service = SearchService(
             adapters=adapters,
-            repository=OptionalRepository(repository),
+            repository=OptionalRepository(cast(SearchRepository, cast(object, repository))),
             location=settings.default_location,
             semantic_enabled=False,
             worker=None,
@@ -281,13 +350,13 @@ async def build_campaign(
 
 
 def sample_campaign(
-    repository,
+    repository: MatchingDatasetRepository,
     campaign_name: str,
     *,
     target_train_count: int,
     target_test_count: int,
     seed: int = 42,
-) -> dict:
+) -> dict[str, object]:
     rng = random.Random(seed)
     rows = repository.list_matching_dataset_rows(campaign_name)
     unique_rows = _dedupe_rows(rows)
@@ -308,7 +377,7 @@ def sample_campaign(
     }
 
 
-def review_campaign(repository, campaign_name: str, *, split: str, limit: int) -> None:
+def review_campaign(repository: MatchingDatasetRepository, campaign_name: str, *, split: str, limit: int) -> None:
     selected_split = None if split == "all" else split
     rows = repository.list_matching_dataset_rows(
         campaign_name,
@@ -339,8 +408,8 @@ def review_campaign(repository, campaign_name: str, *, split: str, limit: int) -
                 print("Invalid command.")
                 continue
             reason = input("reason > ").strip() or None
-            repository.label_matching_dataset_item(
-                row["id"],
+            _ = repository.label_matching_dataset_item(
+                _required_int(row, "id"),
                 label,
                 label_source="human_assisted",
                 label_reason=reason,
@@ -349,24 +418,24 @@ def review_campaign(repository, campaign_name: str, *, split: str, limit: int) -
             break
 
 
-def freeze_campaign(repository, campaign_name: str, *, allow_incomplete: bool = False) -> None:
+def freeze_campaign(repository: MatchingDatasetRepository, campaign_name: str, *, allow_incomplete: bool = False) -> None:
     rows = repository.list_matching_dataset_rows(campaign_name)
     selected = [row for row in rows if row["split"] in {"train", "test"}]
     unlabeled = [row for row in selected if row["label"] is None]
     if unlabeled and not allow_incomplete:
         raise RuntimeError(f"Cannot freeze campaign with {len(unlabeled)} unlabeled train/test items.")
-    repository.freeze_matching_dataset_campaign(campaign_name)
+    _ = repository.freeze_matching_dataset_campaign(campaign_name)
 
 
 def evaluate_campaign(
-    repository,
+    repository: MatchingDatasetRepository,
     campaign_name: str,
     artifact_path: str | None = None,
     semantic_builder: SemanticPairFeatureBuilder | None = None,
     semantic_model: str | None = None,
     reranker_builder: RerankerPairFeatureBuilder | None = None,
     reranker_model: str | None = None,
-) -> dict:
+) -> MetricsReport:
     train_rows = _labeled_binary_rows(
         repository.list_matching_dataset_rows(campaign_name, split="train", labeled=True)
     )
@@ -376,7 +445,7 @@ def evaluate_campaign(
     if not train_rows or not test_rows:
         raise RuntimeError("Campaign needs labeled same/different rows in both train and test splits.")
 
-    ml = _load_ml()
+    ml = load_ml()
     x_train, y_train = _matrix_from_campaign_rows(
         train_rows,
         semantic_builder=semantic_builder,
@@ -387,15 +456,15 @@ def evaluate_campaign(
         semantic_builder=semantic_builder,
         reranker_builder=reranker_builder,
     )
-    estimator, algorithm = _build_estimator(ml, len(y_train), sum(y_train), len(y_train) - sum(y_train))
-    estimator.fit(x_train, y_train)
-    probabilities = estimator.predict_proba(x_test)[:, 1]
+    estimator, algorithm = build_estimator(ml, len(y_train), sum(y_train), len(y_train) - sum(y_train))
+    _ = estimator.fit(x_train, y_train)
+    probabilities = _positive_probabilities(estimator.predict_proba(x_test))
     threshold_report = {
         str(threshold): _metrics_at_threshold(y_test, probabilities, threshold)
         for threshold in [0.5, 0.8, 0.9, 0.95]
     }
     predictions = [1 if probability >= 0.5 else 0 for probability in probabilities]
-    metrics = _classification_metrics(y_test, predictions, probabilities)
+    metrics = classification_metrics(y_test, predictions, probabilities)
     report = {
         "campaign_name": campaign_name,
         "algorithm": algorithm,
@@ -414,7 +483,7 @@ def evaluate_campaign(
     if artifact_path:
         path = Path(artifact_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        ml.joblib.dump(
+        _ = ml.joblib.dump(
             {
                 "version": f"{campaign_name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
                 "algorithm": algorithm,
@@ -429,53 +498,60 @@ def evaluate_campaign(
             path,
         )
         report["artifact_path"] = str(path)
-    return report
+    return cast(MetricsReport, report)
 
 
 def _load_query_categories(path: str | None) -> dict[str, str]:
     if path is None:
         return dict(DEFAULT_QUERY_CATEGORIES)
-    data = json.loads(Path(path).read_text())
+    data = cast(object, json.loads(Path(path).read_text()))
     if isinstance(data, dict):
-        return {str(query): str(category) for query, category in data.items()}
+        return {str(query): str(category) for query, category in cast(dict[object, object], data).items()}
     if isinstance(data, list):
-        return {str(item["query"]): str(item["category"]) for item in data}
+        items = cast(list[dict[str, object]], data)
+        return {
+            str(row["query"]): str(row["category"])
+            for row in items
+        }
     raise ValueError("queries file must be a JSON object or a list of query/category objects")
 
 
-def _predict_candidate_fields(repository, candidates: Sequence) -> dict[int, dict]:
+def _predict_candidate_fields(
+    repository: MatchingDatasetRepository, candidates: Sequence[ProductMatchCandidate]
+) -> dict[int, PredictionFields]:
     if not candidates:
         return {}
     model_row = repository.get_active_match_model()
     if model_row is None:
         return {}
-    ml = _load_ml()
-    bundle = ml.joblib.load(model_row["artifact_path"])
-    feature_names = bundle.get("feature_names") or FEATURE_NAMES
-    semantic_model = bundle.get("semantic_embedding_model")
+    ml = load_ml()
+    bundle = cast(dict[str, object], ml.joblib.load(_required_str(model_row, "artifact_path")))
+    feature_names = cast(Sequence[str], bundle.get("feature_names") or FEATURE_NAMES)
+    semantic_model = _optional_str(bundle, "semantic_embedding_model")
     semantic_builder = (
         build_local_semantic_feature_builder(model_name=semantic_model)
         if semantic_model
         else None
     )
-    reranker_model = bundle.get("reranker_model")
+    reranker_model = _optional_str(bundle, "reranker_model")
     reranker_builder = (
         build_local_reranker_feature_builder(model_name=reranker_model)
         if reranker_model
         else None
     )
-    features = _features_from_candidates(
+    features = features_from_candidates(
         candidates,
         semantic_builder=semantic_builder,
         reranker_builder=reranker_builder,
     )
-    probabilities = bundle["estimator"].predict_proba([
+    estimator = cast(_Predictor, bundle["estimator"])
+    probabilities = _positive_probabilities(estimator.predict_proba([
         vectorize_features(feature, feature_names)
         for feature in features
-    ])[:, 1]
+    ]))
     return {
         candidate.id: {
-            "model_version": model_row["version"],
+            "model_version": _required_str(model_row, "version"),
             "model_match_probability": round(float(probability), 6),
             "model_decision": decision_from_probability(float(probability)),
         }
@@ -483,7 +559,11 @@ def _predict_candidate_fields(repository, candidates: Sequence) -> dict[int, dic
     }
 
 
-def _dataset_item_from_candidate(candidate, category: str, prediction: dict | None = None) -> dict:
+def _dataset_item_from_candidate(
+    candidate: ProductMatchCandidate,
+    category: str,
+    prediction: PredictionFields | None = None,
+) -> CampaignRow:
     prediction = prediction or {}
     return {
         "candidate_id": candidate.id,
@@ -504,11 +584,13 @@ def _dataset_item_from_candidate(candidate, category: str, prediction: dict | No
     }
 
 
-def _dedupe_rows(rows: Sequence[dict]) -> list[dict]:
+def _dedupe_rows(rows: Sequence[CampaignRow]) -> list[CampaignRow]:
     seen_pairs: set[tuple[str, str]] = set()
-    unique_rows: list[dict] = []
+    unique_rows: list[CampaignRow] = []
     for row in rows:
-        pair_key = tuple(sorted([row["left_product_url"], row["right_product_url"]]))
+        left_url = _required_str(row, "left_product_url")
+        right_url = _required_str(row, "right_product_url")
+        pair_key = (left_url, right_url) if left_url <= right_url else (right_url, left_url)
         if pair_key in seen_pairs:
             continue
         seen_pairs.add(pair_key)
@@ -516,9 +598,9 @@ def _dedupe_rows(rows: Sequence[dict]) -> list[dict]:
     return unique_rows
 
 
-def _selection_bucket(row: dict) -> str:
+def _selection_bucket(row: CampaignRow) -> str:
     features = _features_from_row(row)
-    probability = row["model_match_probability"]
+    probability = _optional_float(row, "model_match_probability")
     if features.bundle_conflict or row["category"] == "accessories_bundles":
         return "deliberate"
     if probability is not None and 0.2 < probability < 0.8:
@@ -530,32 +612,32 @@ def _selection_bucket(row: dict) -> str:
     return "random"
 
 
-def _select_bucketed(rows: list[dict], target_total: int, rng: random.Random) -> list[dict]:
-    by_bucket: dict[str, list[dict]] = defaultdict(list)
+def _select_bucketed(rows: list[CampaignRow], target_total: int, rng: random.Random) -> list[CampaignRow]:
+    by_bucket: dict[str, list[CampaignRow]] = defaultdict(list)
     for row in rows:
-        by_bucket[row["_bucket"]].append(row)
+        by_bucket[_required_str(row, "_bucket")].append(row)
     for bucket_rows in by_bucket.values():
         rng.shuffle(bucket_rows)
-    selected: list[dict] = []
+    selected: list[CampaignRow] = []
     selected_ids: set[int] = set()
     for bucket, ratio in TARGET_BUCKET_RATIOS.items():
         quota = int(target_total * ratio)
         for row in by_bucket.get(bucket, [])[:quota]:
             selected.append(row)
-            selected_ids.add(row["id"])
-    leftovers = [row for row in rows if row["id"] not in selected_ids]
+            selected_ids.add(_required_int(row, "id"))
+    leftovers = [row for row in rows if _required_int(row, "id") not in selected_ids]
     rng.shuffle(leftovers)
     selected.extend(leftovers[: max(0, target_total - len(selected))])
     return selected[:target_total]
 
 
 def _split_selected(
-    rows: list[dict],
+    rows: list[CampaignRow],
     target_train_count: int,
     target_test_count: int,
     rng: random.Random,
 ) -> list[tuple[int, str, str]]:
-    groups: dict[str, list[dict]] = defaultdict(list)
+    groups: dict[str, list[CampaignRow]] = defaultdict(list)
     for row in rows:
         groups[_group_key(row)].append(row)
     grouped_rows = list(groups.values())
@@ -571,7 +653,7 @@ def _split_selected(
             else train_ids
         )
         for row in group:
-            target.add(row["id"])
+            target.add(_required_int(row, "id"))
     if len(test_ids) < target_test_count:
         for group in grouped_rows:
             if any(row["id"] in test_ids for row in group):
@@ -579,40 +661,43 @@ def _split_selected(
             if len(test_ids) + len(group) > target_test_count:
                 continue
             for row in group:
-                if row["id"] in train_ids:
-                    train_ids.remove(row["id"])
-                test_ids.add(row["id"])
+                row_id = _required_int(row, "id")
+                if row_id in train_ids:
+                    train_ids.remove(row_id)
+                test_ids.add(row_id)
             if len(test_ids) >= target_test_count:
                 break
     for row in rows:
-        if row["id"] not in test_ids and len(train_ids) < target_train_count:
-            train_ids.add(row["id"])
+        row_id = _required_int(row, "id")
+        if row_id not in test_ids and len(train_ids) < target_train_count:
+            train_ids.add(row_id)
 
     assignments: list[tuple[int, str, str]] = []
     for row in rows:
-        split = "test" if row["id"] in test_ids else "train"
+        row_id = _required_int(row, "id")
+        split = "test" if row_id in test_ids else "train"
         if split == "train" and len([item for item in assignments if item[1] == "train"]) >= target_train_count:
             continue
         if split == "test" and len([item for item in assignments if item[1] == "test"]) >= target_test_count:
             continue
-        assignments.append((row["id"], split, row["_bucket"]))
+        assignments.append((row_id, split, _required_str(row, "_bucket")))
     return assignments
 
 
-def _group_key(row: dict) -> str:
-    keys = sorted([row["left_canonical_key"], row["right_canonical_key"]])
-    return f"{row['category']}|{keys[0]}|{keys[1]}"
+def _group_key(row: CampaignRow) -> str:
+    keys = sorted([_required_str(row, "left_canonical_key"), _required_str(row, "right_canonical_key")])
+    return f"{_required_str(row, 'category')}|{keys[0]}|{keys[1]}"
 
 
-def _features_from_row(row: dict) -> ProductPairFeatures:
-    base_features = ProductPairFeatures(**(row["features"] or {}))
+def _features_from_row(row: CampaignRow) -> ProductPairFeatures:
+    base_features = ProductPairFeatures.model_validate(_features_dict(row))
     return build_pair_features_from_values(
-        left_title=row["left_title"],
-        right_title=row["right_title"],
-        left_price=row["left_price"],
-        right_price=row["right_price"],
-        left_canonical_key=row["left_canonical_key"],
-        right_canonical_key=row["right_canonical_key"],
+        left_title=_required_str(row, "left_title"),
+        right_title=_required_str(row, "right_title"),
+        left_price=_optional_float(row, "left_price"),
+        right_price=_optional_float(row, "right_price"),
+        left_canonical_key=_optional_str(row, "left_canonical_key"),
+        right_canonical_key=_optional_str(row, "right_canonical_key"),
         base_features=base_features,
     )
 
@@ -627,7 +712,7 @@ def _has_conflict(features: ProductPairFeatures) -> bool:
     ])
 
 
-def _format_campaign_row(row: dict, index: int, total: int) -> str:
+def _format_campaign_row(row: CampaignRow, index: int, total: int) -> str:
     features = _features_from_row(row)
     probability = row["model_match_probability"]
     return "\n".join([
@@ -655,7 +740,7 @@ def _format_campaign_row(row: dict, index: int, total: int) -> str:
     ])
 
 
-def _labeled_binary_rows(rows: list[dict]) -> list[dict]:
+def _labeled_binary_rows(rows: list[CampaignRow]) -> list[CampaignRow]:
     return [
         row
         for row in rows
@@ -664,7 +749,7 @@ def _labeled_binary_rows(rows: list[dict]) -> list[dict]:
 
 
 def _matrix_from_campaign_rows(
-    rows: list[dict],
+    rows: list[CampaignRow],
     *,
     semantic_builder: SemanticPairFeatureBuilder | None = None,
     reranker_builder: RerankerPairFeatureBuilder | None = None,
@@ -672,10 +757,10 @@ def _matrix_from_campaign_rows(
     raw_features = [_features_from_row(row) for row in rows]
     pairs = [
         PairTextValues(
-            left_title=row["left_title"],
-            right_title=row["right_title"],
-            left_canonical_key=row["left_canonical_key"],
-            right_canonical_key=row["right_canonical_key"],
+            left_title=_required_str(row, "left_title"),
+            right_title=_required_str(row, "right_title"),
+            left_canonical_key=_optional_str(row, "left_canonical_key"),
+            right_canonical_key=_optional_str(row, "right_canonical_key"),
         )
         for row in rows
     ]
@@ -688,14 +773,14 @@ def _matrix_from_campaign_rows(
     return features, labels
 
 
-def _metrics_at_threshold(labels: list[int], probabilities, threshold: float) -> dict:
+def _metrics_at_threshold(labels: list[int], probabilities: Sequence[float], threshold: float) -> MetricsReport:
     predictions = [1 if probability >= threshold else 0 for probability in probabilities]
-    metrics = _classification_metrics(labels, predictions, probabilities)
+    metrics = cast(MetricsReport, classification_metrics(labels, predictions, probabilities))
     metrics["threshold"] = threshold
     return metrics
 
 
-def _calibration_buckets(labels: list[int], probabilities) -> list[dict]:
+def _calibration_buckets(labels: list[int], probabilities: Sequence[float]) -> list[MetricsReport]:
     buckets: dict[str, list[tuple[int, float]]] = defaultdict(list)
     for label, probability in zip(labels, probabilities):
         bucket_floor = min(9, int(float(probability) * 10)) / 10
@@ -710,6 +795,53 @@ def _calibration_buckets(labels: list[int], probabilities) -> list[dict]:
         }
         for bucket, values in sorted(buckets.items())
     ]
+
+
+def _positive_probabilities(values: object) -> list[float]:
+    matrix = cast(Sequence[Sequence[float]], values)
+    return [float(row[1]) for row in matrix]
+
+
+def _features_dict(row: CampaignRow) -> dict[str, object]:
+    value = row.get("features")
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+
+
+def _required_str(row: dict[str, object], key: str) -> str:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"Expected {key} to be str")
+    return value
+
+
+def _optional_str(row: dict[str, object], key: str) -> str | None:
+    value = row.get(key)
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _required_int(row: CampaignRow, key: str) -> int:
+    value = row[key]
+    if not isinstance(value, int):
+        raise TypeError(f"Expected {key} to be int")
+    return value
+
+
+def _required_bool(row: CampaignRow, key: str) -> bool:
+    value = row[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"Expected {key} to be bool")
+    return value
+
+
+def _optional_float(row: dict[str, object], key: str) -> float | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ const unsafeOutputPatterns = [
   /<\s*\/?\s*parameter\b/i,
   /"name"\s*:\s*"search-?products?"/i,
   /"name"\s*:\s*"searchProducts"/i,
+  /"name"\s*:\s*"search-?everywhere"/i,
+  /"name"\s*:\s*"searchEverywhere"/i,
   /"arguments"\s*:\s*\{[^}]*"query"\s*:/i,
   /\b(voy|paso|vamos)\s+a\s+buscar\b/i,
   /\bllamo\s+en\s+paralelo\b/i,
@@ -80,7 +82,7 @@ export function toTraceLabel(event: MastraStreamEvent): string {
 
   const toolName = toolNameFromEvent(event);
   if (event.type === "tool-result") {
-    return `${toolDisplayName(toolName)} listo`;
+    return `${toolDisplayName(toolName)}`;
   }
 
   if (isToolRunningEvent(event.type)) {
@@ -245,6 +247,9 @@ function toolRunningLabel(toolName: string | undefined): string {
   switch (toolName) {
     case "searchProducts":
       return "Buscando productos";
+    case "searchEverywhere":
+    case "search-everywhere":
+      return "Buscando en toda la web (puede tardar más de lo normal)...";
     case "getMatchingCandidates":
       return "Comparando candidatos";
     case "getPriceHistory":
@@ -266,6 +271,9 @@ function toolDisplayName(toolName: string | undefined): string {
   switch (toolName) {
     case "searchProducts":
       return "Busqueda";
+    case "searchEverywhere":
+    case "search-everywhere":
+      return "Busqueda Global";
     case "getMatchingCandidates":
       return "Matching";
     case "getPriceHistory":

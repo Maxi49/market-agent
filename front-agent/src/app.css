@@ -31,7 +31,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100dvh;
   overflow: hidden;
   background: var(--bg);
 }
@@ -46,14 +46,14 @@ button {
 }
 
 #app {
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .app-shell {
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
-  height: 100vh;
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   overflow: hidden;
   background:
     radial-gradient(circle at 72% 5%, rgba(95, 202, 166, 0.06), transparent 30%),
@@ -65,7 +65,7 @@ button {
   top: 0;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100dvh;
   padding: 22px 14px;
   border-right: 1px solid var(--line);
   background: #151512;
@@ -185,8 +185,8 @@ button {
   display: grid;
   grid-template-rows: 58px minmax(0, 1fr);
   min-width: 0;
-  height: 100vh;
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   overflow: hidden;
 }
 
@@ -247,7 +247,7 @@ h1 {
   overflow-x: hidden;
   overflow-anchor: none;
   overscroll-behavior: contain;
-  padding: 44px 32px 190px;
+  padding: 44px 32px 280px;
 }
 
 .messages {
@@ -437,15 +437,19 @@ h1 {
   content: "";
 }
 
-.assistant-copy table {
+.assistant-copy .table-container {
   width: 100%;
   margin: 18px 0;
-  overflow: hidden;
-  border-collapse: separate;
-  border-spacing: 0;
+  overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #11110f;
+}
+
+.assistant-copy table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
   font-family: var(--mono);
   font-size: 13px;
 }
@@ -553,7 +557,7 @@ h1 {
 }
 
 .assistant-copy .recommendation-original-rank {
-  color: var(--faint);
+  display: none;
 }
 
 .assistant-copy .markdown-link-button {
@@ -901,7 +905,7 @@ textarea::placeholder {
 
   .chat-scroll {
     padding-top: 28px;
-    padding-bottom: 208px;
+    padding-bottom: 280px;
   }
 
   .query-pill {
@@ -914,8 +918,8 @@ textarea::placeholder {
   }
 
   .assistant-copy table {
-    display: block;
-    overflow-x: auto;
+    width: max-content;
+    min-width: 100%;
   }
 
   .composer-hint {

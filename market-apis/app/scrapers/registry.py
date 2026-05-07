@@ -15,6 +15,7 @@ from app.scrapers.vtex import (
     EasyAdapter,
     SamsungAdapter,
     SonyAdapter,
+    FarmacityAdapter,
 )
 
 load_dotenv()
@@ -33,6 +34,7 @@ def build_store_registry(client: httpx.AsyncClient | None = None) -> dict[str, S
         EasyAdapter(client=client),
         BGHAdapter(client=client),
         SonyAdapter(client=client),
+        FarmacityAdapter(client=client),
     ]
     if amazon_adapter is not None:
         adapters.append(amazon_adapter)

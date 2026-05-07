@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from types import SimpleNamespace
+from typing import Protocol, TypeAlias, cast
 
 from app.config import get_settings
 from app.database import build_repository
@@ -14,10 +17,10 @@ from app.matching_semantic import (
     DEFAULT_RERANKER_MODEL,
     DEFAULT_SEMANTIC_CACHE_PATH,
     DEFAULT_SENTENCE_TRANSFORMER_MODEL,
-    PairTextValues,
     RERANKER_FEATURE_NAMES,
-    RerankerPairFeatureBuilder,
     SEMANTIC_FEATURE_NAMES,
+    PairTextValues,
+    RerankerPairFeatureBuilder,
     SemanticPairFeatureBuilder,
     build_local_reranker_feature_builder,
     build_local_semantic_feature_builder,
@@ -25,7 +28,11 @@ from app.matching_semantic import (
     resolve_reranker_model_name,
     resolve_semantic_model_name,
 )
-from app.models import ProductMatchCandidate, ProductMatchLabelValue, ProductPairFeatures
+from app.models import (
+    ProductMatchCandidate,
+    ProductMatchLabelValue,
+    ProductPairFeatures,
+)
 
 FEATURES_VERSION = "pair_features_v5"
 BASE_FEATURE_NAMES = [
@@ -45,6 +52,51 @@ BASE_FEATURE_NAMES = [
 ]
 FEATURE_NAMES = BASE_FEATURE_NAMES + SEMANTIC_FEATURE_NAMES + RERANKER_FEATURE_NAMES
 DEFAULT_ARTIFACT_PATH = Path("artifacts/matching/model.joblib")
+DataRow: TypeAlias = dict[str, object]
+MetricValue: TypeAlias = str | int | float
+MetricReport: TypeAlias = dict[str, MetricValue]
+ModelBundle: TypeAlias = dict[str, object]
+
+
+class MatchEstimator(Protocol):
+    def fit(self, features: Sequence[Sequence[float]], labels: Sequence[int]) -> object: ...
+
+    def predict_proba(self, features: Sequence[Sequence[float]]) -> object: ...
+
+
+class _JoblibModule(Protocol):
+    def dump(self, value: object, filename: str | Path) -> object: ...
+
+    def load(self, filename: str | Path) -> object: ...
+
+
+class _MLBundle(Protocol):
+    joblib: _JoblibModule
+    LogisticRegression: Callable[..., MatchEstimator]
+    CalibratedClassifierCV: Callable[..., MatchEstimator]
+    train_test_split: Callable[..., list[object]]
+
+
+class MatchingModelRepository(Protocol):
+    def get_match_training_rows(self) -> list[DataRow]: ...
+    def save_match_model(
+        self,
+        *,
+        version: str,
+        algorithm: str,
+        features_version: str,
+        artifact_path: str,
+        labels_count: int,
+        positive_count: int,
+        negative_count: int,
+        metrics: MetricReport,
+        active: bool,
+    ) -> object: ...
+    def get_active_match_model(self) -> DataRow | None: ...
+    def get_unlabeled_match_candidates_for_prediction(self, limit: int) -> list[ProductMatchCandidate]: ...
+    def save_match_predictions(
+        self, version: str, predictions: Sequence[tuple[int, float, str]]
+    ) -> int: ...
 
 
 @dataclass
@@ -55,7 +107,7 @@ class TrainingResult:
     labels_count: int
     positive_count: int
     negative_count: int
-    metrics: dict
+    metrics: MetricReport
 
 
 def vectorize_features(
@@ -90,7 +142,7 @@ def decision_from_probability(probability: float) -> str:
 
 
 def train_matching_model(
-    repository,
+    repository: MatchingModelRepository,
     artifact_path: Path = DEFAULT_ARTIFACT_PATH,
     min_labels: int = 50,
     min_per_class: int = 10,
@@ -108,14 +160,20 @@ def train_matching_model(
     )
     positive_count = sum(labels)
     negative_count = len(labels) - positive_count
-    if len(labels) < min_labels or positive_count < min_per_class or negative_count < min_per_class:
+    if (
+        len(labels) < min_labels
+        or positive_count < min_per_class
+        or negative_count < min_per_class
+    ):
         raise RuntimeError(
             "Not enough labeled data to train matching model: "
-            f"labels={len(labels)}, same={positive_count}, different={negative_count}, "
-            f"required labels>={min_labels} and each class>={min_per_class}."
+            + f"labels={len(labels)}, same={positive_count}, different={negative_count}, "
+            + f"required labels>={min_labels} and each class>={min_per_class}."
         )
 
-    estimator, algorithm = _build_estimator(ml, len(labels), positive_count, negative_count)
+    estimator, algorithm = _build_estimator(
+        ml, len(labels), positive_count, negative_count
+    )
     metrics = _validation_metrics(
         ml,
         features,
@@ -124,11 +182,11 @@ def train_matching_model(
         positive_count,
         negative_count,
     )
-    estimator.fit(features, labels)
+    _ = estimator.fit(features, labels)
     version = datetime.now(timezone.utc).strftime("match-%Y%m%d%H%M%S")
 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    ml.joblib.dump(
+    _ = ml.joblib.dump(
         {
             "version": version,
             "algorithm": algorithm,
@@ -136,19 +194,15 @@ def train_matching_model(
             "feature_names": FEATURE_NAMES,
             "estimator": estimator,
             "semantic_embedding_model": (
-                resolve_semantic_model_name(semantic_model)
-                if semantic_model
-                else None
+                resolve_semantic_model_name(semantic_model) if semantic_model else None
             ),
             "reranker_model": (
-                resolve_reranker_model_name(reranker_model)
-                if reranker_model
-                else None
+                resolve_reranker_model_name(reranker_model) if reranker_model else None
             ),
         },
         artifact_path,
     )
-    repository.save_match_model(
+    _ = repository.save_match_model(
         version=version,
         algorithm=algorithm,
         features_version=FEATURES_VERSION,
@@ -170,14 +224,14 @@ def train_matching_model(
     )
 
 
-def predict_unlabeled(repository, limit: int = 1000) -> int:
+def predict_unlabeled(repository: MatchingModelRepository, limit: int = 1000) -> int:
     ml = _load_ml()
     model_row = repository.get_active_match_model()
     if model_row is None:
         raise RuntimeError("No active matching model found.")
-    bundle = ml.joblib.load(model_row["artifact_path"])
-    estimator = bundle["estimator"]
-    feature_names = bundle.get("feature_names") or FEATURE_NAMES
+    bundle = cast(ModelBundle, ml.joblib.load(_required_str(model_row, "artifact_path")))
+    estimator = cast(MatchEstimator, bundle["estimator"])
+    feature_names = cast(Sequence[str], bundle.get("feature_names") or FEATURE_NAMES)
     semantic_builder = _semantic_builder_from_bundle(bundle)
     reranker_builder = _reranker_builder_from_bundle(bundle)
     candidates = repository.get_unlabeled_match_candidates_for_prediction(limit)
@@ -191,7 +245,7 @@ def predict_unlabeled(repository, limit: int = 1000) -> int:
             reranker_builder=reranker_builder,
         )
     ]
-    probabilities = estimator.predict_proba(features)[:, 1]
+    probabilities = _positive_probabilities(estimator.predict_proba(features))
     predictions = [
         (
             candidate.id,
@@ -200,17 +254,17 @@ def predict_unlabeled(repository, limit: int = 1000) -> int:
         )
         for candidate, probability in zip(candidates, probabilities)
     ]
-    return repository.save_match_predictions(model_row["version"], predictions)
+    return repository.save_match_predictions(_required_str(model_row, "version"), predictions)
 
 
-def evaluate_matching_model(repository) -> dict:
+def evaluate_matching_model(repository: MatchingModelRepository) -> MetricReport:
     ml = _load_ml()
     model_row = repository.get_active_match_model()
     if model_row is None:
         raise RuntimeError("No active matching model found.")
     rows = repository.get_match_training_rows()
-    bundle = ml.joblib.load(model_row["artifact_path"])
-    feature_names = bundle.get("feature_names") or FEATURE_NAMES
+    bundle = cast(ModelBundle, ml.joblib.load(_required_str(model_row, "artifact_path")))
+    feature_names = cast(Sequence[str], bundle.get("feature_names") or FEATURE_NAMES)
     semantic_builder = _semantic_builder_from_bundle(bundle)
     reranker_builder = _reranker_builder_from_bundle(bundle)
     features, labels = _training_matrix(
@@ -221,14 +275,14 @@ def evaluate_matching_model(repository) -> dict:
     )
     if not labels:
         raise RuntimeError("No labeled data available for evaluation.")
-    estimator = bundle["estimator"]
-    probabilities = estimator.predict_proba(features)[:, 1]
+    estimator = cast(MatchEstimator, bundle["estimator"])
+    probabilities = _positive_probabilities(estimator.predict_proba(features))
     predictions = [1 if probability >= 0.5 else 0 for probability in probabilities]
     return _classification_metrics(labels, predictions, probabilities)
 
 
 def _training_matrix(
-    rows: Sequence[dict],
+    rows: Sequence[DataRow],
     *,
     semantic_builder: SemanticPairFeatureBuilder | None = None,
     reranker_builder: RerankerPairFeatureBuilder | None = None,
@@ -255,17 +309,17 @@ def _training_matrix(
     return features, labels
 
 
-def _features_from_training_row(row: dict) -> ProductPairFeatures:
-    base_features = ProductPairFeatures(**(row["features"] or {}))
+def _features_from_training_row(row: DataRow) -> ProductPairFeatures:
+    base_features = ProductPairFeatures.model_validate(_features_dict(row))
     if not row.get("left_title") or not row.get("right_title"):
         return base_features
     return build_pair_features_from_values(
-        left_title=row["left_title"],
-        right_title=row["right_title"],
-        left_price=row.get("left_price"),
-        right_price=row.get("right_price"),
-        left_canonical_key=row.get("left_canonical_key"),
-        right_canonical_key=row.get("right_canonical_key"),
+        left_title=_required_str(row, "left_title"),
+        right_title=_required_str(row, "right_title"),
+        left_price=_optional_float(row, "left_price"),
+        right_price=_optional_float(row, "right_price"),
+        left_canonical_key=_optional_str(row, "left_canonical_key"),
+        right_canonical_key=_optional_str(row, "right_canonical_key"),
         base_features=base_features,
     )
 
@@ -305,44 +359,48 @@ def _features_from_candidates(
     return features
 
 
-def _pair_from_training_row(row: dict) -> PairTextValues:
+def _pair_from_training_row(row: DataRow) -> PairTextValues:
     return PairTextValues(
-        left_title=row.get("left_title") or "",
-        right_title=row.get("right_title") or "",
-        left_canonical_key=row.get("left_canonical_key"),
-        right_canonical_key=row.get("right_canonical_key"),
+        left_title=_optional_str(row, "left_title") or "",
+        right_title=_optional_str(row, "right_title") or "",
+        left_canonical_key=_optional_str(row, "left_canonical_key"),
+        right_canonical_key=_optional_str(row, "right_canonical_key"),
     )
 
 
-def _semantic_builder_from_bundle(bundle: dict) -> SemanticPairFeatureBuilder | None:
-    model_name = bundle.get("semantic_embedding_model")
+def _semantic_builder_from_bundle(bundle: ModelBundle) -> SemanticPairFeatureBuilder | None:
+    model_name = _optional_str(bundle, "semantic_embedding_model")
     if not model_name:
         return None
     return build_local_semantic_feature_builder(model_name=model_name)
 
 
-def _reranker_builder_from_bundle(bundle: dict) -> RerankerPairFeatureBuilder | None:
-    model_name = bundle.get("reranker_model")
+def _reranker_builder_from_bundle(bundle: ModelBundle) -> RerankerPairFeatureBuilder | None:
+    model_name = _optional_str(bundle, "reranker_model")
     if not model_name:
         return None
     return build_local_reranker_feature_builder(model_name=model_name)
 
 
-def _build_estimator(ml, labels_count: int, positive_count: int, negative_count: int):
+def _build_estimator(
+    ml: _MLBundle, labels_count: int, positive_count: int, negative_count: int
+) -> tuple[MatchEstimator, str]:
     base = ml.LogisticRegression(class_weight="balanced", max_iter=1000)
     if labels_count >= 100 and positive_count >= 20 and negative_count >= 20:
-        return ml.CalibratedClassifierCV(base, method="sigmoid", cv=3), "logistic_regression_calibrated_sigmoid"
+        return ml.CalibratedClassifierCV(
+            base, method="sigmoid", cv=3
+        ), "logistic_regression_calibrated_sigmoid"
     return base, "logistic_regression"
 
 
 def _validation_metrics(
-    ml,
+    ml: _MLBundle,
     features: list[list[float]],
     labels: list[int],
     labels_count: int,
     positive_count: int,
     negative_count: int,
-) -> dict:
+) -> MetricReport:
     if labels_count >= 50 and positive_count >= 10 and negative_count >= 10:
         split = ml.train_test_split(
             features,
@@ -351,10 +409,15 @@ def _validation_metrics(
             random_state=42,
             stratify=labels,
         )
-        x_train, x_test, y_train, y_test = split
-        estimator, _ = _build_estimator(ml, len(y_train), sum(y_train), len(y_train) - sum(y_train))
-        estimator.fit(x_train, y_train)
-        probabilities = estimator.predict_proba(x_test)[:, 1]
+        x_train = cast(list[list[float]], split[0])
+        x_test = cast(list[list[float]], split[1])
+        y_train = cast(list[int], split[2])
+        y_test = cast(list[int], split[3])
+        estimator, _ = _build_estimator(
+            ml, len(y_train), sum(y_train), len(y_train) - sum(y_train)
+        )
+        _ = estimator.fit(x_train, y_train)
+        probabilities = _positive_probabilities(estimator.predict_proba(x_test))
         predictions = [1 if probability >= 0.5 else 0 for probability in probabilities]
         metrics = _classification_metrics(y_test, predictions, probabilities)
         metrics["evaluation"] = "held_out_20_percent"
@@ -362,15 +425,17 @@ def _validation_metrics(
         return metrics
 
     estimator, _ = _build_estimator(ml, labels_count, positive_count, negative_count)
-    estimator.fit(features, labels)
-    probabilities = estimator.predict_proba(features)[:, 1]
+    _ = estimator.fit(features, labels)
+    probabilities = _positive_probabilities(estimator.predict_proba(features))
     predictions = [1 if probability >= 0.5 else 0 for probability in probabilities]
     metrics = _classification_metrics(labels, predictions, probabilities)
     metrics["evaluation"] = "training_set"
     return metrics
 
 
-def _classification_metrics(labels: list[int], predictions: list[int], probabilities) -> dict:
+def _classification_metrics(
+    labels: list[int], predictions: list[int], probabilities: Sequence[float]
+) -> MetricReport:
     total = len(labels)
     tp = sum(1 for truth, pred in zip(labels, predictions) if truth == 1 and pred == 1)
     tn = sum(1 for truth, pred in zip(labels, predictions) if truth == 0 and pred == 0)
@@ -379,7 +444,10 @@ def _classification_metrics(labels: list[int], predictions: list[int], probabili
     precision = tp / (tp + fp) if tp + fp else 0
     recall = tp / (tp + fn) if tp + fn else 0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
-    brier = sum((float(prob) - truth) ** 2 for prob, truth in zip(probabilities, labels)) / total
+    brier = (
+        sum((float(prob) - truth) ** 2 for prob, truth in zip(probabilities, labels))
+        / total
+    )
     return {
         "accuracy": round((tp + tn) / total, 4) if total else 0,
         "precision": round(precision, 4),
@@ -392,91 +460,160 @@ def _classification_metrics(labels: list[int], predictions: list[int], probabili
     }
 
 
-@dataclass
-class _MLBundle:
-    joblib: Any
-    LogisticRegression: Any
-    CalibratedClassifierCV: Any
-    train_test_split: Any
+def _positive_probabilities(values: object) -> list[float]:
+    matrix = cast(Sequence[Sequence[float]], values)
+    return [float(row[1]) for row in matrix]
+
+
+def _features_dict(row: DataRow) -> dict[str, object]:
+    value = row.get("features")
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+
+
+def _required_str(row: dict[str, object], key: str) -> str:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"Expected {key} to be str")
+    return value
+
+
+def _optional_str(row: dict[str, object], key: str) -> str | None:
+    value = row.get(key)
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _optional_float(row: DataRow, key: str) -> float | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _required_int(row: DataRow, key: str) -> int:
+    value = row[key]
+    if not isinstance(value, int):
+        raise TypeError(f"Expected {key} to be int")
+    return value
 
 
 def _load_ml() -> _MLBundle:
     try:
-        import joblib
-        from sklearn.calibration import CalibratedClassifierCV
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.model_selection import train_test_split
+        joblib = importlib.import_module("joblib")
+        sklearn_calibration = importlib.import_module("sklearn.calibration")
+        sklearn_linear_model = importlib.import_module("sklearn.linear_model")
+        sklearn_model_selection = importlib.import_module("sklearn.model_selection")
     except ImportError as exc:
         raise RuntimeError(
             'Matching model dependencies are missing. Install them with: pip install -e ".[ml]"'
         ) from exc
 
-    return _MLBundle(
-        joblib=joblib,
-        CalibratedClassifierCV=CalibratedClassifierCV,
-        LogisticRegression=LogisticRegression,
-        train_test_split=train_test_split,
+    return cast(
+        _MLBundle,
+        cast(object, SimpleNamespace(
+            joblib=cast(_JoblibModule, cast(object, joblib)),
+            CalibratedClassifierCV=cast(
+                Callable[..., MatchEstimator],
+                getattr(sklearn_calibration, "CalibratedClassifierCV"),
+            ),
+            LogisticRegression=cast(
+                Callable[..., MatchEstimator],
+                getattr(sklearn_linear_model, "LogisticRegression"),
+            ),
+            train_test_split=cast(
+                Callable[..., list[object]],
+                getattr(sklearn_model_selection, "train_test_split"),
+            ),
+        )),
     )
 
 
-def _repository():
-    return build_repository(get_settings().database_url)
+features_from_candidates = _features_from_candidates
+build_estimator = _build_estimator
+classification_metrics = _classification_metrics
+load_ml = _load_ml
+
+
+def _repository() -> MatchingModelRepository:
+    return cast(MatchingModelRepository, cast(object, build_repository(get_settings().database_url)))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train and run local product matching model.")
+    parser = argparse.ArgumentParser(
+        description="Train and run local product matching model."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser("train")
-    train_parser.add_argument("--artifact-path", default=str(DEFAULT_ARTIFACT_PATH))
-    train_parser.add_argument("--min-labels", type=int, default=50)
-    train_parser.add_argument("--min-per-class", type=int, default=10)
-    train_parser.add_argument("--semantic-model", default=None)
-    train_parser.add_argument("--semantic-cache-path", default=str(DEFAULT_SEMANTIC_CACHE_PATH))
-    train_parser.add_argument("--reranker-model", default=None)
-    train_parser.add_argument("--reranker-cache-path", default=str(DEFAULT_RERANKER_CACHE_PATH))
+    _ = train_parser.add_argument("--artifact-path", default=str(DEFAULT_ARTIFACT_PATH))
+    _ = train_parser.add_argument("--min-labels", type=int, default=50)
+    _ = train_parser.add_argument("--min-per-class", type=int, default=10)
+    _ = train_parser.add_argument("--semantic-model", default=None)
+    _ = train_parser.add_argument(
+        "--semantic-cache-path", default=str(DEFAULT_SEMANTIC_CACHE_PATH)
+    )
+    _ = train_parser.add_argument("--reranker-model", default=None)
+    _ = train_parser.add_argument(
+        "--reranker-cache-path", default=str(DEFAULT_RERANKER_CACHE_PATH)
+    )
 
     predict_parser = subparsers.add_parser("predict-unlabeled")
-    predict_parser.add_argument("--limit", type=int, default=1000)
+    _ = predict_parser.add_argument("--limit", type=int, default=1000)
 
-    subparsers.add_parser("evaluate")
+    _ = subparsers.add_parser("evaluate")
 
-    args = parser.parse_args()
+    args = cast(dict[str, object], vars(parser.parse_args()))
+    command = _required_str(args, "command")
     repository = _repository()
     try:
-        if args.command == "train":
+        if command == "train":
+            semantic_arg = _optional_str(args, "semantic_model")
+            reranker_arg = _optional_str(args, "reranker_model")
             semantic_builder = (
                 build_local_semantic_feature_builder(
-                    model_name=args.semantic_model or DEFAULT_SENTENCE_TRANSFORMER_MODEL,
-                    cache_path=Path(args.semantic_cache_path),
+                    model_name=semantic_arg or DEFAULT_SENTENCE_TRANSFORMER_MODEL,
+                    cache_path=Path(_required_str(args, "semantic_cache_path")),
                 )
-                if args.semantic_model
+                if semantic_arg
                 else None
             )
-            semantic_model = resolve_semantic_model_name(args.semantic_model) if args.semantic_model else None
+            semantic_model = (
+                resolve_semantic_model_name(semantic_arg)
+                if semantic_arg
+                else None
+            )
             reranker_builder = (
                 build_local_reranker_feature_builder(
-                    model_name=args.reranker_model or DEFAULT_RERANKER_MODEL,
-                    cache_path=Path(args.reranker_cache_path),
+                    model_name=reranker_arg or DEFAULT_RERANKER_MODEL,
+                    cache_path=Path(_required_str(args, "reranker_cache_path")),
                 )
-                if args.reranker_model
+                if reranker_arg
                 else None
             )
-            reranker_model = resolve_reranker_model_name(args.reranker_model) if args.reranker_model else None
+            reranker_model = (
+                resolve_reranker_model_name(reranker_arg)
+                if reranker_arg
+                else None
+            )
             result = train_matching_model(
                 repository,
-                artifact_path=Path(args.artifact_path),
-                min_labels=args.min_labels,
-                min_per_class=args.min_per_class,
+                artifact_path=Path(_required_str(args, "artifact_path")),
+                min_labels=_required_int(args, "min_labels"),
+                min_per_class=_required_int(args, "min_per_class"),
                 semantic_builder=semantic_builder,
                 semantic_model=semantic_model,
                 reranker_builder=reranker_builder,
                 reranker_model=reranker_model,
             )
             print(result)
-        elif args.command == "predict-unlabeled":
-            print({"predictions_saved": predict_unlabeled(repository, limit=args.limit)})
-        elif args.command == "evaluate":
+        elif command == "predict-unlabeled":
+            print(
+                {"predictions_saved": predict_unlabeled(repository, limit=_required_int(args, "limit"))}
+            )
+        elif command == "evaluate":
             print(evaluate_matching_model(repository))
     except RuntimeError as exc:
         parser.exit(1, f"error: {exc}\n")

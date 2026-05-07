@@ -36,6 +36,7 @@ from app.models import (
     SearchLocation,
     SearchMode,
     SearchResponse,
+    SearchEverywhereResponse,
     StoreError,
 )
 from app.normalization import ProductNormalizer
@@ -722,6 +723,126 @@ class SearchService:
             error_type=error_type,
         )
         return adapter.store_id, adapter.store_name, products, error, metric
+
+    async def search_everywhere(
+        self,
+        query: str,
+        target_url: str | None = None,
+        limit: int = 10,
+        max_price_ars: float | None = None,
+        min_price_ars: float | None = None,
+        strict: bool = False
+    ) -> SearchEverywhereResponse:
+        import os
+        import httpx
+
+        api_key = os.getenv("SERPAPI_API_KEY") or os.getenv("SERP_API_KEY")
+        if not api_key:
+            return SearchEverywhereResponse(error="SERPAPI_API_KEY/SERP_API_KEY no configurado.")
+
+        serpapi_query = f"{query} {target_url}" if target_url else query
+
+        params = {
+            "engine": "google_shopping",
+            "q": serpapi_query,
+            "api_key": api_key,
+            "google_domain": "google.com.ar",
+            "gl": "ar",
+            "hl": "es",
+            # Pedimos más resultados a SerpApi porque el filtrado reducirá la cantidad útil.
+            "num": str(min(limit * 3, 50) if (max_price_ars or min_price_ars or strict) else limit),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.request("GET", "https://serpapi.com/search.json", params=params)
+                response.raise_for_status()
+                data = response.json()
+                shopping_results = data.get("shopping_results", [])
+
+                if isinstance(shopping_results, list):
+                    valid_items = []
+
+                    clean_target = ""
+                    core_domain = ""
+                    if strict and target_url:
+                        clean_target = target_url.lower().replace("https://", "").replace("http://", "").replace("www.", "")
+                        core_domain = clean_target.split(".")[0]
+
+                    for item in shopping_results:
+                        if not isinstance(item, dict):
+                            continue
+
+                        if strict and target_url:
+                            import urllib.parse
+                            # Para Google Shopping, el source es el campo mas confiable
+                            # ya que el link suele ser una URL interna de google.com/search?ibp=oshop
+                            source_raw = str(item.get("source", "")).lower().strip()
+                            source_clean = source_raw.replace(" ", "")
+
+                            # Match por source (el mas confiable): "Lenovo", "lenovo", etc.
+                            source_matches = core_domain in source_clean or clean_target in source_clean
+
+                            # Match por link directo (solo si no es un link de google shopping)
+                            link = str(item.get("product_link") or item.get("link", ""))
+                            parsed_link = urllib.parse.urlparse(link)
+                            host = (parsed_link.hostname or "").lower()
+                            is_google_shopping_link = host in (
+                                "www.google.com", "google.com",
+                                "www.google.com.ar", "google.com.ar"
+                            )
+
+                            if is_google_shopping_link:
+                                # Para links de Google Shopping, el unico criterio confiable es el source
+                                if not source_matches:
+                                    continue
+                            else:
+                                # Para links directos, chequeamos host O source
+                                link_matches = clean_target in host
+                                if not source_matches and not link_matches:
+                                    continue
+
+                        # Extraer el precio: intentamos con 'extracted_price' o parseando 'price'
+                        price_val = None
+                        extracted = item.get("extracted_price")
+                        if isinstance(extracted, (int, float)):
+                            price_val = float(extracted)
+                        else:
+                            price_str = item.get("price")
+                            if isinstance(price_str, str):
+                                import re
+                                match = re.search(r'[\d.,]+', price_str)
+                                if match:
+                                    clean_str = match.group().replace('.', '').replace(',', '.')
+                                    try:
+                                        price_val = float(clean_str)
+                                    except ValueError:
+                                        pass
+
+                        # Aplicar filtro de precios con holguras
+                        if price_val is not None:
+                            if max_price_ars is not None and price_val > max_price_ars * 1.15:
+                                continue
+                            if min_price_ars is not None and price_val < min_price_ars * 0.80:
+                                continue
+
+                        valid_items.append(item)
+                        if len(valid_items) >= limit:
+                            break
+
+                    return SearchEverywhereResponse(shopping_results=valid_items)
+
+                return SearchEverywhereResponse(shopping_results=[])
+        except httpx.HTTPError as exc:
+            msg = str(exc) or exc.__class__.__name__
+            if hasattr(exc, "response") and exc.response is not None:
+                try:
+                    msg += f" - Response: {exc.response.text}"
+                except:
+                    pass
+            return SearchEverywhereResponse(error=f"Error consultando SerpAPI: {msg}")
+        except Exception as exc:
+            return SearchEverywhereResponse(error=f"Error inesperado: {exc}")
 
 
 def _per_store_limit(limit: int, mode: SearchMode) -> int:

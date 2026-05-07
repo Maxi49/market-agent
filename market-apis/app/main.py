@@ -14,6 +14,7 @@ from app.models import (
     ProductMatchLabelResponse,
     ProductMatchSummary,
     SearchMode,
+    SearchEverywhereResponse,
     StoreError,
 )
 from app.scrapers.registry import build_store_registry
@@ -121,6 +122,26 @@ async def agent_search_history(
     service: SearchService = Depends(get_search_service),
 ) -> AgentHistoryResponse:
     return await service.agent_search_history(run_id)
+
+
+@app.get("/agent/search-everywhere", response_model=SearchEverywhereResponse)
+async def agent_search_everywhere(
+    query: str = Query(..., min_length=2, max_length=120),
+    url: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    max_price_ars: float | None = Query(None, gt=0),
+    min_price_ars: float | None = Query(None, gt=0),
+    strict: bool = Query(False),
+    service: SearchService = Depends(get_search_service),
+) -> SearchEverywhereResponse:
+    return await service.search_everywhere(
+        query=query,
+        target_url=url,
+        limit=limit,
+        max_price_ars=max_price_ars,
+        min_price_ars=min_price_ars,
+        strict=strict
+    )
 
 
 @app.get("/internal/matching/candidates", response_model=list[ProductMatchCandidate])

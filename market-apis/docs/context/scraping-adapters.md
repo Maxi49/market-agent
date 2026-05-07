@@ -108,6 +108,13 @@ SERP_API_KEY=...
 - Plataforma: VTEX.
 - Fuerte en hogar, electro y TV; weak para smartphones/notebooks.
 
+### Farmacity (`farmacity_ar`)
+
+- Adapter: `FarmacityAdapter` en `app/scrapers/vtex.py`.
+- Plataforma: VTEX.
+- Fuerte en salud, cuidado personal, belleza, perfumería y algunos ítems de supermercado.
+- Router la marca como fuerte (`STRONG`) en la categoría `health_beauty` y débil/bloqueada en tecnología para evitar polución de resultados.
+
 ## Link Guard
 
 - Archivo: `app/link_guard.py`.

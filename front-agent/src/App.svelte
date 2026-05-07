@@ -45,6 +45,7 @@
   const mastraBaseUrl = import.meta.env.VITE_MASTRA_BASE_URL || "";
   const resourceId = "front-agent-local-user";
   const suggestions = [
+    "Shampoo y cuidado personal",
     "Notebooks para estudiantes < USD 500",
     "Smart TVs: variacion de precios ultimo mes",
     "Comparar iPhone 15 en tiendas",

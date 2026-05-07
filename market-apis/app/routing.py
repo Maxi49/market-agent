@@ -8,7 +8,7 @@ from app.models import QueryUnderstanding, RoutingDecision
 
 STORE_IDS = [
     "mercado_libre", "fravega", "samsung_ar", "carrefour_ar", "cetrogar_ar",
-    "easy_ar", "bgh_ar", "sony_ar", "amazon_us",
+    "easy_ar", "bgh_ar", "sony_ar", "amazon_us", "farmacity_ar",
 ]
 
 BRAND_KEYWORDS = {
@@ -41,6 +41,7 @@ CATEGORY_KEYWORDS = {
     "tv": {"tv", "televisor", "smart"},
     "home_appliances": {"heladera", "lavarropas", "microondas", "freezer", "aire"},
     "supermarket": {"supermercado", "yerba", "leche", "arroz", "fideos", "aceite"},
+    "health_beauty": {"farmacia", "salud", "belleza", "shampoo", "crema", "perfume", "maquillaje", "desodorante", "suplemento", "vitamina", "pañales", "skincare"},
 }
 
 ACCESSORY_INTENT_KEYWORDS = {
@@ -144,8 +145,26 @@ STORE_PROFILES = {
             "tv": StoreFit.STRONG,
             "home_appliances": StoreFit.STRONG,
             "supermarket": StoreFit.WEAK,
+            "health_beauty": StoreFit.BLOCKED,
         },
         brand_fit={},
+    ),
+    # Farmacity: Fuerte en salud, belleza, cuidado personal y bebes.
+    # Bloqueado/débil para tech.
+    "farmacity_ar": StoreProfile(
+        store_id="farmacity_ar",
+        default_fit=StoreFit.WEAK,
+        category_fit={
+            "smartphones": StoreFit.BLOCKED,
+            "notebooks": StoreFit.BLOCKED,
+            "tv": StoreFit.BLOCKED,
+            "audio": StoreFit.WEAK,
+            "gaming": StoreFit.BLOCKED,
+            "home_appliances": StoreFit.WEAK,
+            "supermarket": StoreFit.OK,
+            "health_beauty": StoreFit.STRONG,
+        },
+        brand_fit={"apple": StoreFit.BLOCKED, "samsung": StoreFit.BLOCKED},
     ),
     # BGH: marca argentina de electrodomésticos y electrónica.
     # Fuerte en heladeras, lavarropas, AC, microondas, TVs. No vende PCs ni iPhones.
@@ -184,6 +203,7 @@ STORE_PROFILES = {
             "smartphones": StoreFit.WEAK,
             "notebooks": StoreFit.BLOCKED,
             "tv": StoreFit.STRONG,
+            "audio": StoreFit.STRONG,
             "home_appliances": StoreFit.WEAK,
             "supermarket": StoreFit.BLOCKED,
         },

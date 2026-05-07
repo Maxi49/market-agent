@@ -175,32 +175,42 @@
 {:else if node.type === "thematicBreak"}
   <hr />
 {:else if node.type === "table"}
-  <table class:recommendation-table={hasRecommendationRows}>
-    {#if tableHeader}
-      <thead>
-        <tr>
-          {#each tableHeader.children ?? [] as cell, cellIndex (childKey(cell, `${path}.head`, cellIndex))}
-            <svelte:element this={tableCellTag(true)}>
-              {#each renderChildren(cell.children, `${path}.head.${cellIndex}`) as child, childIndex (childKey(child, `${path}.head.${cellIndex}`, childIndex))}
-                <MarkdownNodeView
-                  node={child}
-                  streaming={false}
-                  path={`${path}.head.${cellIndex}.${childIndex}`}
-                />
-              {/each}
-            </svelte:element>
-          {/each}
-        </tr>
-      </thead>
-    {/if}
-    <tbody>
-      {#each tableBody as row, rowIndex (childKey(row, `${path}.body`, rowIndex))}
-        <tr class={row.data?.recommendationClass ?? undefined}>
-          {#each row.children ?? [] as cell, cellIndex (childKey(cell, `${path}.body.${rowIndex}`, cellIndex))}
-            <svelte:element this={tableCellTag(false)}>
-              {#if row.data?.recommendationRank && cellIndex === 0}
-                <span class="recommendation-badge">#{row.data.recommendationRank}</span>
-                <span class="recommendation-original-rank">
+  <div class="table-container">
+    <table class:recommendation-table={hasRecommendationRows}>
+      {#if tableHeader}
+        <thead>
+          <tr>
+            {#each tableHeader.children ?? [] as cell, cellIndex (childKey(cell, `${path}.head`, cellIndex))}
+              <svelte:element this={tableCellTag(true)}>
+                {#each renderChildren(cell.children, `${path}.head.${cellIndex}`) as child, childIndex (childKey(child, `${path}.head.${cellIndex}`, childIndex))}
+                  <MarkdownNodeView
+                    node={child}
+                    streaming={false}
+                    path={`${path}.head.${cellIndex}.${childIndex}`}
+                  />
+                {/each}
+              </svelte:element>
+            {/each}
+          </tr>
+        </thead>
+      {/if}
+      <tbody>
+        {#each tableBody as row, rowIndex (childKey(row, `${path}.body`, rowIndex))}
+          <tr class={row.data?.recommendationClass ?? undefined}>
+            {#each row.children ?? [] as cell, cellIndex (childKey(cell, `${path}.body.${rowIndex}`, cellIndex))}
+              <svelte:element this={tableCellTag(false)}>
+                {#if row.data?.recommendationRank && cellIndex === 0}
+                  <span class="recommendation-badge">#{row.data.recommendationRank}</span>
+                  <span class="recommendation-original-rank">
+                    {#each renderChildren(cell.children, `${path}.body.${rowIndex}.${cellIndex}`) as child, childIndex (childKey(child, `${path}.body.${rowIndex}.${cellIndex}`, childIndex))}
+                      <MarkdownNodeView
+                        node={child}
+                        streaming={false}
+                        path={`${path}.body.${rowIndex}.${cellIndex}.${childIndex}`}
+                      />
+                    {/each}
+                  </span>
+                {:else}
                   {#each renderChildren(cell.children, `${path}.body.${rowIndex}.${cellIndex}`) as child, childIndex (childKey(child, `${path}.body.${rowIndex}.${cellIndex}`, childIndex))}
                     <MarkdownNodeView
                       node={child}
@@ -208,22 +218,14 @@
                       path={`${path}.body.${rowIndex}.${cellIndex}.${childIndex}`}
                     />
                   {/each}
-                </span>
-              {:else}
-                {#each renderChildren(cell.children, `${path}.body.${rowIndex}.${cellIndex}`) as child, childIndex (childKey(child, `${path}.body.${rowIndex}.${cellIndex}`, childIndex))}
-                  <MarkdownNodeView
-                    node={child}
-                    streaming={false}
-                    path={`${path}.body.${rowIndex}.${cellIndex}.${childIndex}`}
-                  />
-                {/each}
-              {/if}
-            </svelte:element>
-          {/each}
-        </tr>
-      {/each}
-    </tbody>
-  </table>
+                {/if}
+              </svelte:element>
+            {/each}
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 {:else if node.value}
   {#each textTokens as token (token.key)}
     {@const className = tokenClass(token)}

@@ -59,9 +59,9 @@ def test_search_index_adapter_uses_google_shopping_and_filters_mercado_libre_sou
     assert products[0].raw_metadata["provider_family"] == "search_index"
     assert products[0].raw_metadata["engine"] == "google_shopping"
     assert products[0].raw_metadata["price_source"] == "shopping_extracted"
-    assert str(products[0].product_url) == "https://listado.mercadolibre.com.ar/apple-iphone-15-pro-128-gb"
-    assert products[0].raw_metadata["link_reliability"] == "search_fallback"
-    assert products[0].raw_metadata["google_product_link"] == "https://www.google.com.ar/search?ibp=oshop&q=iphone+15+pro&prds=pid:123"
+    assert str(products[0].product_url) == "https://www.google.com.ar/search?ibp=oshop&q=iphone+15+pro&prds=pid:123"
+    assert products[0].raw_metadata["link_reliability"] == "google_product"
+    assert "google_product_link" not in products[0].raw_metadata
     params = client.requests[0][2]["params"]
     assert params["engine"] == "google_shopping"
     assert params["google_domain"] == "google.com.ar"

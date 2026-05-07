@@ -7,8 +7,9 @@ from typing import Any, Iterable
 from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup, Tag
+from pydantic import HttpUrl, TypeAdapter, ValidationError
 
-from app.models import Product, SearchLocation, SearchMode
+from app.models import Product, ProductAvailability, ProductCondition, SearchLocation, SearchMode
 from app.scrapers.url_analyzer import analyze_url
 from app.scrapers.base import (
     HttpStoreAdapter,
@@ -20,6 +21,8 @@ from app.scrapers.base import (
     optional_text,
     tag_attr,
 )
+
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 @dataclass(frozen=True)
@@ -81,10 +84,13 @@ class FravegaAdapter(HttpStoreAdapter):
 
         products = []
         for i, analysis in enumerate(analyses):
-            if isinstance(analysis, Exception) or analysis.error or not analysis.title or not analysis.price:
+            if isinstance(analysis, BaseException) or analysis.error or not analysis.title or not analysis.price:
                 continue
-            
-            from app.models import ProductAvailability, ProductCondition
+
+            product_url = _http_url(analysis.url)
+            if product_url is None:
+                continue
+
             products.append(
                 Product(
                     store_id=self.store_id,
@@ -98,8 +104,8 @@ class FravegaAdapter(HttpStoreAdapter):
                     installments=analysis.installments,
                     shipping=None,
                     seller=None,
-                    image_url=analysis.image_url,
-                    product_url=analysis.url,
+                    image_url=_http_url(analysis.image_url),
+                    product_url=product_url,
                     condition=ProductCondition.NEW if analysis.condition == "new" else ProductCondition.USED if analysis.condition == "used" else ProductCondition.UNKNOWN,
                     availability=ProductAvailability.IN_STOCK if analysis.availability == "in_stock" else ProductAvailability.UNKNOWN,
                     raw_metadata={"fallback_used": True},
@@ -205,3 +211,12 @@ class FravegaAdapter(HttpStoreAdapter):
         if not image:
             return None
         return tag_attr(image, "src") or tag_attr(image, "data-src")
+
+
+def _http_url(value: str | None) -> HttpUrl | None:
+    if value is None:
+        return None
+    try:
+        return _HTTP_URL_ADAPTER.validate_python(value)
+    except ValidationError:
+        return None
